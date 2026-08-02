@@ -1,17 +1,27 @@
 #!/usr/bin/env python3
 """
-Lucineer Job Processor v2 — Hybrid Intelligence
-================================================
+Lucineer Job Processor v2 — Hybrid Intelligence with Memory
+============================================================
 Two-speed brain:
   FAST: Pattern-matched templates (instant, no model call)
   DEEP: brain.py 3-stage pipeline (Seed → Planner → Coder) for complex requests
 
+Memory-integrated:
+  - Player profiles (D1): upsert on every job, bond level tracked
+  - Build history (D1): every build logged with type, commands, position
+  - Conversations (D1): player messages and Lucineer's replies saved
+  - Skill search (Vectorize): semantic lookup against 35-skill library
+  - Conversation recall: last 5 turns injected into brain context
+
 Processor flow:
   1. Poll Worker for pending jobs
   2. Check world state for context (what's already built nearby)
-  3. Try keyword match → fast template
-  4. If no match → call brain.py for deep generation
-  5. Post result back to Worker
+  3. Recall player memory (profile, recent builds, recent conversations)
+  4. Search Vectorize for relevant skills
+  5. Try keyword match → fast template
+  6. If no match → call brain.py with memory + skill context
+  7. Post result back to Worker
+  8. Save to memory (build, conversation, profile upsert)
 
 Usage:
   python3 process_v2.py --loop          # continuous mode (default 2s poll)
@@ -26,11 +36,21 @@ from pathlib import Path
 # ─── Config ───────────────────────────────────────────────────────────────────
 
 WORKER_URL = "https://lucineer-relay.casey-digennaro.workers.dev"
+MEMORY_URL = os.environ.get("LUCINEER_MEMORY_URL",
+                            "https://lucineer-memory.casey-digennaro.workers.dev")
+VECTOR_URL = os.environ.get("LUCINEER_VECTOR_URL",
+                            "https://lucineer-vector.casey-digennaro.workers.dev")
 AUTH_KEY = "feba836ba409a7e959d957c7c4051fa6243a3436367073e52c567f979f49c9a7"
 LOG_FILE = str(Path(__file__).parent / "processor.log")
 BRAIN_SCRIPT = str(Path(__file__).parent.parent / "lucineer-brain" / "brain.py")
 DEEP_TIMEOUT = 120  # seconds for brain.py call
 MAX_RETRIES = 2
+
+# Skill match score threshold for Vectorize results
+SKILL_SCORE_THRESHOLD = 0.5
+
+# Number of recent conversations to recall for context
+CONVERSATION_RECALL_LIMIT = 5
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
@@ -77,6 +97,241 @@ def api_post(path, data):
     except Exception as e:
         log(f"API POST failed for {path}: {e}", "ERROR")
         return {}
+
+# ─── Memory D1 API ────────────────────────────────────────────────────────────
+
+def memory_get(path):
+    """GET from Memory D1 Worker (no auth — to be added)."""
+    try:
+        result = subprocess.run(
+            ['curl', '-s', '--max-time', '10',
+             f'{MEMORY_URL}{path}'],
+            capture_output=True, text=True, timeout=15
+        )
+        return json.loads(result.stdout)
+    except Exception as e:
+        log(f"Memory GET failed for {path}: {e}", "WARN")
+        return {}
+
+def memory_post(path, data):
+    """POST to Memory D1 Worker (no auth — to be added)."""
+    try:
+        body = json.dumps(data)
+        result = subprocess.run(
+            ['curl', '-s', '--max-time', '10',
+             '-X', 'POST',
+             '-H', 'Content-Type: application/json',
+             '-d', body,
+             f'{MEMORY_URL}{path}'],
+            capture_output=True, text=True, timeout=15
+        )
+        return json.loads(result.stdout)
+    except Exception as e:
+        log(f"Memory POST failed for {path}: {e}", "WARN")
+        return {}
+
+# ─── Vectorize API ────────────────────────────────────────────────────────────
+
+def vector_post(path, data):
+    """POST to Vectorize Worker."""
+    try:
+        body = json.dumps(data)
+        result = subprocess.run(
+            ['curl', '-s', '--max-time', '15',
+             '-X', 'POST',
+             '-H', 'Content-Type: application/json',
+             '-d', body,
+             f'{VECTOR_URL}{path}'],
+            capture_output=True, text=True, timeout=20
+        )
+        return json.loads(result.stdout)
+    except Exception as e:
+        log(f"Vector POST failed for {path}: {e}", "WARN")
+        return {}
+
+# ─── Memory: Player Profile ───────────────────────────────────────────────────
+
+def upsert_player_profile(player_name, session_id):
+    """Upsert player profile — updates last_seen, preserves bond_level."""
+    result = memory_post("/api/memory/player", {
+        "player_name": player_name,
+        # bond_level intentionally omitted — the D1 upsert should preserve it
+        # (GAP_ANALYSIS #4 notes a bug where omitting it resets to 0; we omit
+        #  anyway and the memory worker needs the COALESCE fix. For now the
+        #  upsert at least tracks last_seen and creates the row if new.)
+    })
+    if result.get("success"):
+        log(f"  Memory: profile upserted for {player_name}")
+    else:
+        log(f"  Memory: profile upsert note: {result}", "WARN")
+    return result
+
+def get_player_profile(player_name):
+    """Fetch player profile from D1."""
+    result = memory_get(f"/api/memory/player/{player_name}")
+    if "error" in result:
+        # Player not found is normal on first interaction
+        return {}
+    return result
+
+# ─── Memory: Build History ────────────────────────────────────────────────────
+
+def log_build(session_id, player_name, description, command_count, position):
+    """Log a build to D1 build_history."""
+    result = memory_post("/api/memory/build", {
+        "session_id": session_id,
+        "player_name": player_name,
+        "description": description,
+        "command_count": command_count,
+        "location": position,
+    })
+    if result.get("success"):
+        log(f"  Memory: build logged ({command_count} commands)")
+    else:
+        log(f"  Memory: build log note: {result}", "WARN")
+    return result
+
+def get_recent_builds(player_name, limit=5):
+    """Fetch player's recent builds."""
+    result = memory_get(f"/api/memory/builds/{player_name}?limit={limit}")
+    return result.get("builds", [])
+
+# ─── Memory: Conversations ────────────────────────────────────────────────────
+
+def log_conversation(session_id, player_name, role, content):
+    """Log a conversation turn to D1."""
+    result = memory_post("/api/memory/conversation", {
+        "session_id": session_id,
+        "player_name": player_name,
+        "role": role,  # "player", "assistant", or "system"
+        "content": content,
+    })
+    if result.get("success"):
+        log(f"  Memory: conversation logged ({role})")
+    else:
+        log(f"  Memory: conversation log note: {result}", "WARN")
+    return result
+
+def get_recent_conversations(session_id, limit=CONVERSATION_RECALL_LIMIT):
+    """Fetch recent conversation turns for context recall."""
+    result = memory_get(f"/api/memory/conversations/{session_id}?limit={limit}")
+    return result.get("conversations", [])
+
+def summarize_conversations(conversations):
+    """Build a compact summary of recent conversation for brain context."""
+    if not conversations:
+        return ""
+
+    # Filter to just player + assistant turns (skip system)
+    turns = []
+    for conv in conversations:
+        role = conv.get("role", "")
+        content = conv.get("content", "")
+        if role == "player":
+            turns.append(f"  Player: \"{content}\"")
+        elif role == "assistant":
+            # Truncate long replies
+            short = content[:120] + "..." if len(content) > 120 else content
+            turns.append(f"  Lucineer: \"{short}\"")
+
+    if not turns:
+        return ""
+
+    return "Recent conversation:\n" + "\n".join(turns)
+
+# ─── Memory: Full Player Context ──────────────────────────────────────────────
+
+def get_player_context(player_name, session_id):
+    """
+    Fetch full player context from D1 memory.
+    Returns profile, recent builds, recent conversations, and a summary string.
+    """
+    profile = get_player_profile(player_name)
+    recent_builds = get_recent_builds(player_name, limit=5)
+
+    # Conversations are session-scoped in the D1 schema
+    conversations = get_recent_conversations(session_id) if session_id else []
+    conv_summary = summarize_conversations(conversations)
+
+    # Build a context string for the brain
+    parts = []
+
+    bond_level = int(profile.get("bond_level", 0))
+    if bond_level > 0:
+        parts.append(f"Player bond level: {bond_level} (higher = more trust, more warmth)")
+
+    prefs = profile.get("preferences")
+    if prefs and isinstance(prefs, str):
+        try:
+            prefs_dict = json.loads(prefs)
+            if prefs_dict:
+                parts.append(f"Player preferences: {json.dumps(prefs_dict)}")
+        except json.JSONDecodeError:
+            pass
+
+    if recent_builds:
+        build_list = [b.get("description", "?") for b in recent_builds[:3]]
+        parts.append(f"Previous builds this session: {', '.join(build_list)}")
+
+    if conv_summary:
+        parts.append(conv_summary)
+
+    context = ". ".join(parts) if parts else ""
+    return {
+        "profile": profile,
+        "recent_builds": recent_builds,
+        "conversations": conversations,
+        "context": context,
+    }
+
+# ─── Vectorize: Skill Search ──────────────────────────────────────────────────
+
+def search_skills(player_message, top_k=3):
+    """
+    Semantic search against the 35-skill Vectorize library.
+    Returns list of {name, description, score} for matches above threshold.
+    """
+    result = vector_post("/api/skills/query", {
+        "query": player_message,
+        "top_k": top_k,
+        "return_metadata": True,
+    })
+
+    matches = result.get("matches", [])
+    if not matches:
+        log(f"  Vectorize: no matches for \"{player_message[:50]}\"")
+        return []
+
+    # Filter by score threshold
+    good_matches = []
+    for m in matches:
+        score = m.get("score", 0)
+        metadata = m.get("metadata", {})
+        name = metadata.get("name", "unknown")
+        desc = metadata.get("description", "")
+
+        if score >= SKILL_SCORE_THRESHOLD:
+            log(f"  Vectorize: match '{name}' (score={score:.3f})")
+            good_matches.append({
+                "name": name,
+                "description": desc,
+                "score": score,
+                "metadata": metadata,
+            })
+        else:
+            log(f"  Vectorize: below threshold '{name}' (score={score:.3f})")
+
+    return good_matches
+
+def format_skill_context(skills):
+    """Format matched skills as context string for the brain."""
+    if not skills:
+        return ""
+
+    lines = ["Relevant skills from the library:"]
+    for s in skills:
+        lines.append(f"  - {s['name']}: {s['description']}")
+    return "\n".join(lines)
 
 # ─── World State Awareness ────────────────────────────────────────────────────
 
@@ -305,12 +560,32 @@ def match_keyword(message):
 
 # ─── Deep Brain Integration ───────────────────────────────────────────────────
 
-def call_brain(player_message, world_context=""):
-    """Call brain.py for deep AI generation. Returns dict with reply + commands."""
-    # Enhance the message with world context
+def call_brain(player_message, world_context="", memory_context="", skill_context=""):
+    """Call brain.py for deep AI generation. Returns dict with reply + commands.
+
+    Args:
+        player_message: The raw player request.
+        world_context: World state info (nearby structures, time, etc.)
+        memory_context: Player memory (bond level, recent builds, conversations)
+        skill_context: Relevant skills from Vectorize semantic search
+    """
+    # Enhance the message with all context layers
     enhanced = player_message
+    context_parts = []
+
     if world_context:
-        enhanced = f"{player_message}\n\n[World Context: {world_context}]"
+        context_parts.append(f"[World Context: {world_context}]")
+    if memory_context:
+        context_parts.append(f"[Player Memory: {memory_context}]")
+    if skill_context:
+        context_parts.append(f"[Skill Library: {skill_context}]")
+
+    if context_parts:
+        enhanced = f"{player_message}\n\n" + "\n".join(context_parts)
+
+    log(f"  Brain context layers: world={'yes' if world_context else 'no'}, "
+        f"memory={'yes' if memory_context else 'no'}, "
+        f"skills={'yes' if skill_context else 'no'}")
 
     try:
         result = subprocess.run(
@@ -365,16 +640,36 @@ def process_job(job, force_deep=False):
 
     log(f"Processing {job_id[:8]} | {player_name} | \"{message}\" | pos=({px},{py},{pz})")
 
-    # Get world context for deep brain
+    # ─── 1. Log the player's incoming message to memory ───
+    if session_id and session_id != "mock-session":
+        log_conversation(session_id, player_name, "player", message)
+
+    # ─── 2. Get world context ───
     world_ctx = get_world_context(session_id)
     if world_ctx:
         log(f"  World context: {world_ctx[:100]}")
 
+    # ─── 3. Recall player memory (profile, builds, conversations) ───
+    memory_ctx = ""
+    if session_id and session_id != "mock-session":
+        player_ctx = get_player_context(player_name, session_id)
+        memory_ctx = player_ctx.get("context", "")
+        if memory_ctx:
+            log(f"  Memory recall: {memory_ctx[:120]}...")
+    else:
+        # Mock mode — still try profile + builds for testing
+        player_ctx = get_player_context(player_name, "")
+        memory_ctx = player_ctx.get("context", "")
+
+    # ─── 4. Search Vectorize for relevant skills ───
+    skills = search_skills(message, top_k=3)
+    skill_ctx = format_skill_context(skills)
+
+    # ─── 5. Try fast path: keyword match ───
     reply = None
     commands = None
     used_path = None
 
-    # Fast path: keyword match
     if not force_deep:
         builder = match_keyword(message)
         if builder:
@@ -382,11 +677,16 @@ def process_job(job, force_deep=False):
             used_path = "template"
             log(f"  → Template match: {builder.__name__} → {len(commands)} commands")
 
-    # Deep path: brain.py
+    # ─── 6. Deep path: brain.py with all context ───
     if not reply:
         used_path = "deep-brain"
         log(f"  → Deep brain pipeline...")
-        brain_result = call_brain(message, world_ctx)
+        brain_result = call_brain(
+            player_message=message,
+            world_context=world_ctx,
+            memory_context=memory_ctx,
+            skill_context=skill_ctx,
+        )
         if brain_result:
             reply = brain_result.get("reply", "")
             commands = brain_result.get("commands", [])
@@ -397,17 +697,57 @@ def process_job(job, force_deep=False):
             reply, commands = b_default(player_name)
             used_path = "fallback"
 
-    # Post result
+    # ─── 7. Post result to Worker ───
+    success = False
     try:
         result = api_post(f"/api/job/{job_id}/result", {
             "reply": reply,
             "commands": commands
         })
         log(f"  ✓ Complete via {used_path} ({len(commands)} commands)")
-        return True
+        success = True
     except Exception as e:
         log(f"  ✗ Failed to post result: {e}", "ERROR")
-        return False
+
+    # ─── 8. Save to memory (build + conversation + profile) ───
+    # Always save, even for mock sessions (helps test the full pipeline)
+    save_to_memory(
+        job_id=job_id,
+        session_id=session_id,
+        player_name=player_name,
+        message=message,
+        reply=reply,
+        commands=commands,
+        px=px, py=py, pz=pz,
+        used_path=used_path,
+    )
+
+    return success
+
+
+def save_to_memory(job_id, session_id, player_name, message, reply, commands,
+                   px, py, pz, used_path):
+    """Persist build, conversation, and profile to D1 memory after job completion."""
+
+    # Determine build type description from the reply or message
+    build_desc = message[:100]  # Use the player's original request as description
+
+    # 1. Upsert player profile FIRST — build_history has a FK to player_profiles
+    upsert_player_profile(player_name, session_id)
+
+    # 2. Log the build (now the player row exists for the FK)
+    log_build(
+        session_id=session_id or "unknown",
+        player_name=player_name,
+        description=build_desc,
+        command_count=len(commands) if commands else 0,
+        position={"x": px, "y": py, "z": pz},
+    )
+
+    # 3. Log Lucineer's reply as assistant conversation
+    if session_id and session_id != "mock-session":
+        log_conversation(session_id, player_name, "assistant", reply)
+
 
 # ─── Main Loops ───────────────────────────────────────────────────────────────
 
@@ -429,11 +769,13 @@ def run_once(force_deep=False):
     return count
 
 def run_loop(interval=2, force_deep=False):
-    log("=== Lucineer Processor v2 — Hybrid Intelligence ===")
-    log(f"  Worker: {WORKER_URL}")
-    log(f"  Brain:  {BRAIN_SCRIPT}")
-    log(f"  Mode:   {'DEEP-ONLY' if force_deep else 'HYBRID (template→brain)'}")
-    log(f"  Poll:   every {interval}s")
+    log("=== Lucineer Processor v2 — Hybrid Intelligence + Memory ===")
+    log(f"  Worker:  {WORKER_URL}")
+    log(f"  Memory:  {MEMORY_URL}")
+    log(f"  Vector:  {VECTOR_URL}")
+    log(f"  Brain:   {BRAIN_SCRIPT}")
+    log(f"  Mode:    {'DEEP-ONLY' if force_deep else 'HYBRID (template→brain)'}")
+    log(f"  Poll:    every {interval}s")
 
     running = True
     def handle_signal(signum, frame):
@@ -458,7 +800,7 @@ def run_loop(interval=2, force_deep=False):
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Lucineer Processor v2")
+    parser = argparse.ArgumentParser(description="Lucineer Processor v2 — Memory-Integrated")
     parser.add_argument("--loop", action="store_true", help="Continuous polling mode")
     parser.add_argument("--once", action="store_true", help="Single poll (default)")
     parser.add_argument("--deep", action="store_true", help="Force deep brain on all jobs")

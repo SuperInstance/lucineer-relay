@@ -1,0 +1,32 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "lucineer-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "account_id": "049ff5e84ecf636b53b162cbb580aae6",
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "LUCINEER_SESSION",
+        "class_name": "LucineerSession"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["LucineerSession"]
+    }
+  ],
+
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+
+  "vars": {
+    "OPENCLAW_CALLBACK_URL": "http://172.22.219.126:18789/api/lucineer/message"
+  }
+}

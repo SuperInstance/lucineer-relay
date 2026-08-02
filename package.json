@@ -1,0 +1,16 @@
+{
+  "name": "lucineer-worker",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "types": "wrangler types"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.8.0",
+    "@types/node": "^26.1.2",
+    "typescript": "^5.7.0",
+    "wrangler": "^4.118.0"
+  }
+}

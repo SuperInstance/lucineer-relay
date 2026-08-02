@@ -18,7 +18,7 @@ set -eo pipefail
 
 # --- Configuration ---
 WORKER_URL="https://lucineer-relay.casey-digennaro.workers.dev"
-AUTH_KEY="feba836ba409a7e959d957c7c4051fa6243a3436367073e52c567f979f49c9a7"
+AUTH_KEY="AUTH_KEY_PLACEHOLDER"
 LOG_FILE="/home/eileen/projects/lucineer-worker/processor.log"
 POLL_INTERVAL=2
 

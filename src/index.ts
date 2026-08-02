@@ -106,7 +106,7 @@ export default {
 
       const callbackBase =
         env.OPENCLAW_CALLBACK_URL ||
-        "http://172.22.219.126:18789/api/lucineer/message";
+        "${OPENCLAW_CALLBACK_URL}";
 
       // Fire and forget — don't fail the request if push is unavailable.
       // The processor also polls /api/jobs/pending, so the job will be picked up.

@@ -40,7 +40,7 @@ MEMORY_URL = os.environ.get("LUCINEER_MEMORY_URL",
                             "https://lucineer-memory.casey-digennaro.workers.dev")
 VECTOR_URL = os.environ.get("LUCINEER_VECTOR_URL",
                             "https://lucineer-vector.casey-digennaro.workers.dev")
-AUTH_KEY = "feba836ba409a7e959d957c7c4051fa6243a3436367073e52c567f979f49c9a7"
+AUTH_KEY = "AUTH_KEY_PLACEHOLDER"
 LOG_FILE = str(Path(__file__).parent / "processor.log")
 BRAIN_SCRIPT = str(Path(__file__).parent.parent / "lucineer-brain" / "brain.py")
 DEEP_TIMEOUT = 120  # seconds for brain.py call

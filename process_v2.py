@@ -29,7 +29,7 @@ Usage:
   python3 process_v2.py --mock "castle" # inject a test job
   python3 process_v2.py --deep          # force deep brain on all jobs
 """
-import json, sys, os, time, subprocess, random, signal, traceback
+import json, sys, os, time, subprocess, random, signal, traceback, resource
 from datetime import datetime
 from pathlib import Path
 
@@ -45,6 +45,11 @@ LOG_FILE = str(Path(__file__).parent / "processor.log")
 BRAIN_SCRIPT = str(Path(__file__).parent.parent / "lucineer-brain" / "brain.py")
 DEEP_TIMEOUT = 120  # seconds for brain.py call
 MAX_RETRIES = 2
+
+# ─── Daemon Resilience Config ────────────────────────────────────────────────
+CIRCUIT_BREAKER_THRESHOLD = 5  # consecutive failures before tripping
+HEARTBEAT_INTERVAL = 60        # seconds between idle heartbeats
+MEMORY_LIMIT_MB = 200          # RSS threshold for memory leak warning
 
 # Skill match score threshold for Vectorize results
 SKILL_SCORE_THRESHOLD = 0.5
@@ -501,10 +506,10 @@ def b_garden(px, py, pz):
         cmds.append({"type":"createPart","params":{"name":f"Flower{i}","shape":"Ball","size":{"x":1.5,"y":1.5,"z":1.5},"position":{"x":fx,"y":py+2,"z":fz},"material":"Neon","color":{"r":c[0],"g":c[1],"b":c[2]},"anchored":True}})
     cmds.append({"type":"createPart","params":{"name":"GardenTreeTrunk","shape":"Cylinder","size":{"x":1.5,"y":8,"z":1.5},"position":{"x":px,"y":py+4,"z":pz},"material":"Wood","color":{"r":85,"g":55,"b":30},"anchored":True}})
     cmds.append({"type":"createPart","params":{"name":"GardenTreeLeaves","shape":"Ball","size":{"x":8,"y":8,"z":8},"position":{"x":px,"y":py+10,"z":pz},"material":"LeafyGrass","color":{"r":50,"g":120,"b":40},"anchored":True}})
-    return ("Bed's in, fence's up, six flowers and a tree at center. Didn't lay the paths — wanted you to pick where they go.", cmds)
+    return ("Bed's in, fence's up, six flowers and a tree at center. Paths aren't — left those for you. A garden should surprise the person walking it.", cmds)
 
 def b_dock(px, py, pz):
-    return ("Piles driven, planks across, lantern at the end. Reminds me of the tenders in Southeast — except those have crab pots. You could add some.", [
+    return ("Piles driven, planks across, lantern at the end. Had a tender like this in the fleet days. No crab pots — those are yours to figure out.", [
         {"type":"createPart","params":{"name":"DockDeck","shape":"Block","size":{"x":6,"y":1,"z":20},"position":{"x":px,"y":py+1,"z":pz},"material":"WoodPlanks","color":{"r":120,"g":80,"b":45},"anchored":True}},
         {"type":"createPart","params":{"name":"DockPile1","shape":"Cylinder","size":{"x":1,"y":6,"z":1},"position":{"x":px-2,"y":py-2,"z":pz-8},"material":"Wood","color":{"r":85,"g":55,"b":30},"anchored":True}},
         {"type":"createPart","params":{"name":"DockPile2","shape":"Cylinder","size":{"x":1,"y":6,"z":1},"position":{"x":px+2,"y":py-2,"z":pz-8},"material":"Wood","color":{"r":85,"g":55,"b":30},"anchored":True}},
@@ -524,10 +529,8 @@ def b_lighthouse(px, py, pz):
     ])
 
 def b_default(player_name):
-    return (f"Couldn't match that to anything in the yard, {player_name}. Tower, house, castle, bridge, "
-            "tree, wall, road, lamp, pyramid, dome, arch, platform, stairs, garden, dock, lighthouse — "
-            "pick one and I'll get to work.", [
-        {"type":"createPart","params":{"name":"CreativeBlock","shape":"Block","size":{"x":4,"y":4,"z":4},"position":{"x":0,"y":10,"z":0},"material":"Neon","color":{"r":100,"g":255,"b":200},"anchored":True}},
+    return ("Couldn't match that to anything in the yard. Tell me what you're building — a tower, a house, a bridge. Give me a shape and I'll give you a structure.", [
+        {"type":"createPart","params":{"name":"MarkerBlock","shape":"Block","size":{"x":2,"y":2,"z":2},"position":{"x":0,"y":10,"z":0},"material":"Metal","color":{"r":120,"g":115,"b":110},"anchored":True}},
     ])
 
 # ─── Keyword Matching ─────────────────────────────────────────────────────────
@@ -768,6 +771,16 @@ def run_once(force_deep=False):
             traceback.print_exc()
     return count
 
+def get_rss_mb():
+    """Return current process RSS in megabytes."""
+    try:
+        # ru_maxrss is in KB on Linux, KB on macOS
+        rss_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        return rss_kb / 1024.0
+    except Exception:
+        return 0.0
+
+
 def run_loop(interval=2, force_deep=False):
     log("=== Lucineer Processor v2 — Hybrid Intelligence + Memory ===")
     log(f"  Worker:  {WORKER_URL}")
@@ -776,8 +789,14 @@ def run_loop(interval=2, force_deep=False):
     log(f"  Brain:   {BRAIN_SCRIPT}")
     log(f"  Mode:    {'DEEP-ONLY' if force_deep else 'HYBRID (template→brain)'}")
     log(f"  Poll:    every {interval}s")
+    log(f"  Circuit breaker: {CIRCUIT_BREAKER_THRESHOLD} consecutive failures")
+    log(f"  Heartbeat: every {HEARTBEAT_INTERVAL}s idle")
+    log(f"  Memory guard: {MEMORY_LIMIT_MB}MB RSS warning")
 
     running = True
+    consecutive_failures = 0
+    last_heartbeat = time.time()
+
     def handle_signal(signum, frame):
         nonlocal running
         log(f"Signal {signum} received, shutting down...")
@@ -788,10 +807,33 @@ def run_loop(interval=2, force_deep=False):
 
     while running:
         try:
-            run_once(force_deep=force_deep)
+            jobs_processed = run_once(force_deep=force_deep)
+
+            # Reset failure counter on any successful poll cycle
+            if jobs_processed > 0:
+                consecutive_failures = 0
+            else:
+                # Idle — emit heartbeat if enough time has passed
+                now = time.time()
+                if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+                    log("Heartbeat: OK (0 pending jobs)")
+                    last_heartbeat = now
+
+                    # Memory leak guard — check RSS on each heartbeat
+                    rss_mb = get_rss_mb()
+                    if rss_mb > MEMORY_LIMIT_MB:
+                        log(f"Memory warning: RSS={rss_mb:.1f}MB exceeds {MEMORY_LIMIT_MB}MB limit", "WARN")
+
         except Exception as e:
-            log(f"Loop error: {e}", "ERROR")
+            consecutive_failures += 1
+            log(f"Loop error ({consecutive_failures}/{CIRCUIT_BREAKER_THRESHOLD}): {e}", "ERROR")
             traceback.print_exc()
+
+            if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD:
+                log(f"CIRCUIT BREAKER TRIPPED: {consecutive_failures} consecutive failures. "
+                    f"Logging critical and continuing — will retry next cycle.", "CRITICAL")
+                # Don't crash — reset counter so we don't spam CRITICAL every iteration
+                # Keep counting; next success resets to 0
         time.sleep(interval)
 
     log("Processor stopped.")

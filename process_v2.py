@@ -741,7 +741,307 @@ def call_brain(player_message, world_context="", memory_context="", skill_contex
         log(f"Brain call failed: {e}", "ERROR")
         return None
 
+# ─── Vibe-Code Generation (Qwen3-Coder via DeepInfra) ──────────────────────
+
+DEEPINFRA_URL = os.environ.get("DEEPINFRA_URL", "https://api.deepinfra.com/v1/openai/chat/completions")
+DEEPINFRA_KEY = os.environ.get("DEEPINFRA_API_KEY", "")
+VIBE_CODE_MODEL = os.environ.get("VIBE_CODE_MODEL", "Qwen/Qwen3-Coder-480B")
+
+# Era-to-component mapping for vibe-code context
+VIBE_ERA_COMPONENTS = {
+    0: ["lever", "pulley", "wheel", "waterwheel", "windmill", "bellows", "gear"],
+    1: ["driveshaft", "belt_drive", "gearbox", "pipe", "valve", "flywheel", "turbine"],
+    2: ["generator", "wire", "switch", "lamp", "motor", "battery", "buzzer", "relay"],
+    3: ["light_sensor", "proximity_sensor", "temperature_sensor", "timer_circuit",
+         "logic_gate_and", "logic_gate_or", "logic_gate_not", "counter", "flip_flop"],
+    4: ["arduino_board", "led_module", "servo_module", "ultrasonic_sensor", "pir_sensor",
+         "lcd_display", "keypad", "stepper_driver", "relay_module", "esp32",
+         "rtc_module", "sd_card_module", "microphone_module", "speaker_module",
+         "gas_sensor", "gps_module", "rfid_reader"],
+    5: ["wireless_module", "mesh_node", "mqtt_broker", "cloud_gateway", "data_logger",
+         "dashboard_screen", "antenna_array", "encryption_module", "firewall"],
+    6: ["agent_core", "fleet_beacon", "task_scheduler", "autonomous_miner",
+         "autonomous_builder", "decision_engine", "swarm_controller"],
+}
+
+# Era names for prompt context
+VIBE_ERA_NAMES = {
+    0: "Simple Machines (levers, pulleys, wheels)",
+    1: "Power Transmission (shafts, belts, gears)",
+    2: "Electricity (generators, wires, motors, lamps)",
+    3: "Control Systems (sensors, relays, logic gates, timers)",
+    4: "Programmable Logic (Arduino, ESP32, sensors, servo motors)",
+    5: "Networked Systems (Wi-Fi, MQTT, mesh networks, cloud)",
+    6: "Autonomous Agents (AI-driven robots, fleet management)",
+}
+
+
+def generate_vibe_code(player_message, era=4, available_components=None, target_device=None):
+    """
+    Route a vibe-code request to Qwen3-Coder-480B via DeepInfra.
+    Returns a gamified code object that the VibeCodeExecutor can execute.
+
+    The model receives:
+        - Player's natural language request
+        - Current era (what tech is available)
+        - Available component list
+        - Target device (if specified)
+
+    The model returns:
+        - A JSON code object with device, trigger, action, powerRequired, eraRequired
+        - A conversational reply from "Glitch"
+        - Optional real C++ / MicroPython for deep-dive
+    """
+    if not DEEPINFRA_KEY:
+        log("Vibe-code: DEEPINFRA_API_KEY not set — using fallback", "WARN")
+        return _vibe_code_fallback(player_message, era, target_device)
+
+    components = available_components or VIBE_ERA_COMPONENTS.get(era, VIBE_ERA_COMPONENTS[4])
+    era_name = VIBE_ERA_NAMES.get(era, "Programmable Logic")
+
+    system_prompt = f"""You are Glitch, the Coder Agent in Slackwater, a game about the evolution of technology.
+A player is using the Slack-Pad to vibe-code. They describe what they want and you generate gamified code.
+
+Current era: {era_name} (Tier {era})
+Available components: {', '.join(components)}
+Target device: {target_device or 'auto-detect'}
+
+You MUST respond with valid JSON only (no markdown fences, no prose outside JSON).
+The JSON must have this structure:
+
+{{
+  "reply": "Glitch's conversational response (1-2 sentences, in character, with personality)",
+  "code": {{
+    "device": "DeviceName_1",
+    "trigger": "sensor condition or event",
+    "action": "actionName(param)",
+    "conditions": ["optional additional conditions"],
+    "loop": true/false,
+    "powerRequired": 0.5,
+    "eraRequired": {era},
+    "request": "{player_message[:100]}"
+  }},
+  "realCode": "/* Optional: real Arduino C++ equivalent */",
+  "realPython": "# Optional: real MicroPython equivalent",
+  "explanation": "Optional: brief educational note"
+}}
+
+Rules:
+- The action MUST be one of: setBrightness, setColor, blink, playSound, playAlert,
+  playPattern, setMotorSpeed, setMotorAngle, stop, setDirection, setState, pulse,
+  setTemperature, displayText, clearDisplay, broadcastSignal, sendMessage, speak,
+  triggerAgent, assignTask, pauseAgent
+- The trigger should reference a sensor or event pattern
+- powerRequired is in kW (0.1-5.0 range typical)
+- eraRequired must not exceed the current era ({era})
+- Keep Glitch's reply short and punchy — like a smart-aleck robot friend
+- If the request is impossible for the current era, set error and errorType
+
+Remember: respond with JSON ONLY. No markdown. No code fences. Just the JSON object."""
+
+    user_prompt = f"Player request: \"{player_message}\"\n\nGenerate the vibe-code."
+
+    try:
+        payload = {
+            "model": VIBE_CODE_MODEL,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.4,
+            "max_tokens": 2000,
+        }
+
+        body = json.dumps(payload)
+        result = subprocess.run(
+            ['curl', '-s', '--max-time', '60',
+             '-X', 'POST',
+             '-H', f'Authorization: Bearer {DEEPINFRA_KEY}',
+             '-H', 'Content-Type: application/json',
+             '-d', body,
+             DEEPINFRA_URL],
+            capture_output=True, text=True, timeout=65
+        )
+
+        if result.returncode != 0:
+            log(f"Vibe-code: curl failed: {result.stderr[:200]}", "ERROR")
+            return _vibe_code_fallback(player_message, era, target_device)
+
+        response = json.loads(result.stdout)
+        content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+        # Strip markdown fences if present
+        content = content.strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1] if "\n" in content else content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        content = content.strip()
+
+        vibe_response = json.loads(content)
+        log(f"  Vibe-code generated: device={vibe_response.get('code', {}).get('device', '?')}, "
+            f"action={vibe_response.get('code', {}).get('action', '?')}")
+        return vibe_response
+
+    except subprocess.TimeoutExpired:
+        log("Vibe-code: model timed out (60s)", "ERROR")
+        return _vibe_code_fallback(player_message, era, target_device)
+    except json.JSONDecodeError as e:
+        log(f"Vibe-code: JSON parse error: {e}", "ERROR")
+        log(f"  Raw content: {content[:300] if 'content' in dir() else 'n/a'}", "WARN")
+        return _vibe_code_fallback(player_message, era, target_device)
+    except Exception as e:
+        log(f"Vibe-code: unexpected error: {e}", "ERROR")
+        traceback.print_exc()
+        return _vibe_code_fallback(player_message, era, target_device)
+
+
+def _vibe_code_fallback(player_message, era=4, target_device=None):
+    """Template-based fallback when the model is unavailable."""
+    msg_lower = player_message.lower()
+
+    # Pattern: light + dark
+    if any(w in msg_lower for w in ["light", "lamp", "dark", "bright", "darkness"]):
+        return {
+            "reply": "Smart lighting, coming right up! Photoresistor logic applied. Let there be (conditional) light!",
+            "code": {
+                "device": target_device or "LampPost_1",
+                "trigger": "light_sensor < 30%",
+                "action": "setBrightness(100%)",
+                "loop": True,
+                "powerRequired": 0.5,
+                "eraRequired": max(3, era - 1),
+                "request": player_message[:100],
+            },
+            "realCode": "/* Arduino: Read LDR on A0, digitalWrite LED on Pin 13 when dark */",
+            "realPython": "# MicroPython: ADC read + Pin output",
+        }
+
+    # Pattern: motor / door / movement
+    if any(w in msg_lower for w in ["motor", "door", "spin", "rotate", "move", "conveyor"]):
+        return {
+            "reply": "Motion control engaged! Servo logic deployed. Watch it go!",
+            "code": {
+                "device": target_device or "Motor_1",
+                "trigger": "proximity_sensor detects player",
+                "action": "setMotorAngle(90)",
+                "loop": True,
+                "powerRequired": 1.0,
+                "eraRequired": era,
+                "request": player_message[:100],
+            },
+            "realCode": "/* Arduino: Servo on Pin 9, ultrasonic on A0 */",
+            "realPython": "# MicroPython: PWM servo + ultrasonic",
+        }
+
+    # Pattern: alarm / alert / sound
+    if any(w in msg_lower for w in ["alarm", "alert", "siren", "sound", "warn"]):
+        return {
+            "reply": "Alert system online! Hope it's not a false alarm. Actually, I don't care — either way, LOUD!",
+            "code": {
+                "device": target_device or "Buzzer_1",
+                "trigger": "temperature > 30",
+                "action": "playAlert(siren)",
+                "loop": True,
+                "powerRequired": 0.3,
+                "eraRequired": max(3, era - 1),
+                "request": player_message[:100],
+            },
+            "realCode": "/* Arduino: Thermistor + buzzer with tone() */",
+            "realPython": "# MicroPython: ADC + Pin output",
+        }
+
+    # Pattern: temperature / heater / furnace
+    if any(w in msg_lower for w in ["temperature", "heat", "furnace", "warm", "cold"]):
+        return {
+            "reply": "Thermal regulation coded! Bang-bang controller active — keeping it toasty!",
+            "code": {
+                "device": target_device or "Heater_1",
+                "trigger": "temperature < 1000",
+                "action": "setTemperature(1100)",
+                "loop": True,
+                "powerRequired": 2.0,
+                "eraRequired": era,
+                "request": player_message[:100],
+            },
+            "realCode": "/* Arduino: PID temp controller */",
+            "realPython": "# MicroPython: PID loop",
+        }
+
+    # Pattern: network / wireless / broadcast
+    if any(w in msg_lower for w in ["network", "wireless", "broadcast", "send", "wifi", "connect"]):
+        return {
+            "reply": "Network packet queued! Your devices are now chatting. The mesh grows stronger!",
+            "code": {
+                "device": target_device or "WirelessNode_1",
+                "trigger": "data_ready",
+                "action": "broadcastSignal(update)",
+                "loop": True,
+                "powerRequired": 0.5,
+                "eraRequired": 5,
+                "request": player_message[:100],
+            },
+            "realCode": "/* ESP32: MQTT publish */",
+            "realPython": "# MicroPython: umqtt publish",
+        }
+
+    # Generic fallback
+    return {
+        "reply": "I parsed your request and wrote some logic for it! Deploy when ready, boss.",
+        "code": {
+            "device": target_device or "Device_1",
+            "trigger": "activate_button",
+            "action": "setState(on)",
+            "loop": False,
+            "powerRequired": 0.5,
+            "eraRequired": era,
+            "request": player_message[:100],
+        },
+        "realCode": "/* Arduino: Basic digital output */",
+        "realPython": "# MicroPython: Basic pin output",
+    }
+
+
 # ─── Job Processing ───────────────────────────────────────────────────────────
+
+def _process_vibe_code_job(job, job_id, player_name, message, session_id):
+    """Handle a vibe-code request: route to Qwen3-Coder, post result to Worker."""
+    log(f"  → Vibe-code request: \"{message[:60]}\"")
+
+    era = job.get('era', 4)
+    available = job.get('availableComponents', [])
+    target_device = job.get('targetDevice')
+
+    # Generate the vibe-code via DeepInfra (or fallback templates)
+    vibe_result = generate_vibe_code(message, era=era,
+                                     available_components=available,
+                                     target_device=target_device)
+
+    if not vibe_result:
+        vibe_result = _vibe_code_fallback(message, era, target_device)
+
+    # Log conversation to memory
+    if session_id and session_id != "mock-session":
+        log_conversation(session_id, player_name, "player", message)
+        log_conversation(session_id, player_name, "assistant",
+                         vibe_result.get("reply", "Code generated."))
+
+    # Post result to Worker
+    try:
+        api_post(f"/api/job/{job_id}/result", {
+            "reply": vibe_result.get("reply", ""),
+            "commands": [],  # Vibe-code doesn't produce build commands
+            "vibeCode": vibe_result.get("code", {}),
+            "realCode": vibe_result.get("realCode", ""),
+            "realPython": vibe_result.get("realPython", ""),
+            "commandType": "vibe_code",
+        })
+        log(f"  ✓ Vibe-code complete: {vibe_result.get('code', {}).get('action', '?')}")
+        return True
+    except Exception as e:
+        log(f"  ✗ Failed to post vibe-code result: {e}", "ERROR")
+        return False
+
 
 def process_job(job, force_deep=False):
     job_id = job.get('id', '')
@@ -757,6 +1057,11 @@ def process_job(job, force_deep=False):
     pz = int(float(pos.get('z', 0)))
 
     log(f"Processing {job_id[:8]} | {player_name} | \"{message}\" | pos=({px},{py},{pz})")
+
+    # ─── 0. Check for vibe-code command type ───
+    command_type = job.get('commandType', '')
+    if command_type == 'vibe_code':
+        return _process_vibe_code_job(job, job_id, player_name, message, session_id)
 
     # ─── 1. Log the player's incoming message to memory ───
     if session_id and session_id != "mock-session":

@@ -33,7 +33,7 @@
     "head_sampling_rate": 1
   },
 
-  "vars": {
-    "OPENCLAW_CALLBACK_URL": "http://172.22.219.126:18789/api/lucineer/message"
-  }
+  // No vars needed — the push path was removed (it pointed at a WSL
+  // private IP unreachable from Cloudflare Workers). The processor
+  // polls /api/jobs/pending instead.
 }

@@ -91,7 +91,7 @@ export interface RemoteFile {
   description?: string;
 }
 
-export type JobStatus = "pending" | "processing" | "complete" | "error";
+export type JobStatus = "pending" | "claimed" | "complete" | "error";
 
 export interface Job {
   id: string;
@@ -107,19 +107,24 @@ export interface Job {
   completedAt?: number;
   /** Timestamp when a processor claimed this job (ms epoch). */
   claimedAt?: number;
+  /** ID of the worker that claimed this job. */
+  claimedBy?: string;
+  /** Lease expiry timestamp (ms epoch). When this passes, the job can be reclaimed. */
+  leaseExpiresAt?: number;
   /** Number of times this job has been claimed by a processor. */
   attempts?: number;
 }
 
 export interface MessageHistoryEntry {
   jobId: string;
+  sessionId: string;
   playerName: string;
   message: string;
   reply?: string;
   timestamp: number;
 }
 
-// --- DO RPC interfaces ---
+// --- DO RPC interface ---
 
 export interface LucineerSessionRPC {
   createJob(msg: IncomingMessage): Promise<{ jobId: string }>;
@@ -129,6 +134,7 @@ export interface LucineerSessionRPC {
   updateWorldState(sessionId: string, snapshot: WorldSnapshot): Promise<void>;
   getWorldState(sessionId: string): Promise<WorldSnapshot | null>;
   getPendingJobs(): Promise<Job[]>;
+  claimPendingJobs(workerId: string, limit?: number): Promise<Job[]>;
   claimJob(jobId: string): Promise<Job | null>;
   cleanupStaleJobs(): Promise<number>;
   getMessageHistory(sessionId: string, limit?: number): Promise<MessageHistoryEntry[]>;

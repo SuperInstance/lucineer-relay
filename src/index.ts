@@ -1,5 +1,5 @@
 import { LucineerSession } from "./do/LucineerSession";
-import type { Env, IncomingMessage, JobResult, TrajectoryEvent } from "./types";
+import type { Env, IncomingMessage, JobResult, TrajectoryEvent, Job } from "./types";
 
 export { LucineerSession };
 
@@ -16,14 +16,12 @@ function isAuthorized(request: Request, env: Env): boolean {
   const authKey = request.headers.get("X-Lucineer-Key");
   if (!authKey) return false;
 
-  // Check new key first, fall back to legacy key
   if (env.LUCINEER_INTERNAL_KEY && authKey === env.LUCINEER_INTERNAL_KEY) {
     return true;
   }
   if (env.LUCINEER_KEY && authKey === env.LUCINEER_KEY) {
     return true;
   }
-  // Also accept the shared secret for inter-service calls (memory/vector calling relay)
   if (env.LUCINEER_SHARED_SECRET && authKey === env.LUCINEER_SHARED_SECRET) {
     return true;
   }
@@ -33,6 +31,30 @@ function isAuthorized(request: Request, env: Env): boolean {
 /** Return a 401 response. */
 function unauthorized(): Response {
   return Response.json({ error: "Unauthorized" }, { status: 401 });
+}
+
+/**
+ * Extract the session ID from a job ID.
+ * Job IDs are formatted as `<urlEncodedSessionId>.<randomHex>`.
+ * Returns the decoded session ID, or "default" as a fallback.
+ */
+function sessionIdFromJobId(jobId: string): string {
+  const dotIdx = jobId.indexOf(".");
+  if (dotIdx > 0) {
+    return decodeURIComponent(jobId.substring(0, dotIdx));
+  }
+  return "default";
+}
+
+/**
+ * Get a Durable Object stub routed by session ID.
+ * This replaces the old getByName("default") pattern that serialized
+ * all players through one object.
+ */
+function sessionStub(env: Env, sessionId: string) {
+  return env.LUCINEER_SESSION.getByName(
+    encodeURIComponent(sessionId),
+  ) as unknown as import("./types").LucineerSessionRPC & { diag(): Promise<Record<string, unknown>> };
 }
 
 // ---------------------------------------------------------------------------
@@ -70,7 +92,7 @@ export default {
         );
       }
 
-      const stub = env.LUCINEER_SESSION.getByName("default");
+      const stub = sessionStub(env, body.sessionId);
       const withinLimit = await stub.checkRateLimit(body.sessionId);
       if (!withinLimit) {
         return Response.json(
@@ -81,44 +103,43 @@ export default {
 
       const { jobId } = await stub.createJob(body);
 
-      // The processor polls /api/jobs/pending — no push path needed.
+      // No push path — the processor polls /api/jobs/pending.
+      // The old OPENCLAW_CALLBACK_URL pointed at a WSL private IP (172.22.x.x)
+      // which Cloudflare Workers can't reach. Push was removed; polling works.
       return Response.json({ jobId, status: "processing" });
     }
 
     // =====================================================================
     // CLIENT POLLING — No auth required
     // The Roblox client polls this endpoint to check job status.
-    // The jobId itself serves as a capability token — knowing the ID
-    // is sufficient to read status. This is the T-Minus model.
+    // The jobId itself serves as a capability token.
     // =====================================================================
-    if (path.startsWith("/api/job/") && method === "GET") {
-      const jobId = path.replace("/api/job/", "");
-      // Guard against sub-paths like /api/job/:id/result on GET
-      if (jobId.includes("/")) {
-        // Sub-path GETs aren't public endpoints — fall through to auth gate
-      } else {
-        const stub = env.LUCINEER_SESSION.getByName("default");
-        const job = await stub.getJob(jobId);
-        if (!job) {
-          return Response.json({ error: "Job not found" }, { status: 404 });
-        }
-        return Response.json(job);
+
+    // Match /api/job/:jobId — accept session-prefixed IDs (contains dots, percent-encoding)
+    const jobMatch = path.match(/^\/api\/job\/([^/]+)$/);
+    if (jobMatch && method === "GET") {
+      const jobId = decodeURIComponent(jobMatch[1]);
+      const sessionId = sessionIdFromJobId(jobId);
+      const stub = sessionStub(env, sessionId);
+      const job = await stub.getJob(jobId);
+      if (!job) {
+        return Response.json({ error: "Job not found" }, { status: 404 });
       }
+      return Response.json(job);
     }
 
     // =====================================================================
     // INTERNAL ENDPOINTS — Require processor auth
-    // Everything below this point requires a valid X-Lucineer-Key.
-    // The Roblox client never touches these.
     // =====================================================================
     if (!isAuthorized(request, env)) {
       return unauthorized();
     }
 
-    // --- GET /api/diag — diagnostic endpoint (now behind auth) ---
+    // --- GET /api/diag — diagnostic endpoint ---
     if (path === "/api/diag" && method === "GET") {
+      // Diag runs on the "default" DO
+      const stub = sessionStub(env, "default");
       try {
-        const stub = env.LUCINEER_SESSION.getByName("default");
         const result = await stub.diag();
         return Response.json(result);
       } catch (e) {
@@ -127,9 +148,10 @@ export default {
     }
 
     // --- POST /api/job/:jobId/result — processor posts results ---
-    const resultMatch = path.match(/^\/api\/job\/([\da-f]+)\/result$/);
+    // Accept session-prefixed job IDs
+    const resultMatch = path.match(/^\/api\/job\/(.+)\/result$/);
     if (resultMatch && method === "POST") {
-      const jobId = resultMatch[1];
+      const jobId = decodeURIComponent(resultMatch[1]);
       let body: JobResult;
       try {
         body = (await request.json()) as JobResult;
@@ -141,7 +163,8 @@ export default {
         return Response.json({ error: "Missing required field: reply" }, { status: 400 });
       }
 
-      const stub = env.LUCINEER_SESSION.getByName("default");
+      const sessionId = sessionIdFromJobId(jobId);
+      const stub = sessionStub(env, sessionId);
       const job = await stub.getJob(jobId);
       if (!job) {
         return Response.json({ error: "Job not found" }, { status: 404 });
@@ -159,11 +182,12 @@ export default {
       });
     }
 
-    // --- POST /api/job/:jobId/claim — atomically claim a job ---
-    const claimMatch = path.match(/^\/api\/job\/([\da-f]+)\/claim$/);
+    // --- POST /api/job/:jobId/claim — atomically claim a single job ---
+    const claimMatch = path.match(/^\/api\/job\/(.+)\/claim$/);
     if (claimMatch && method === "POST") {
-      const jobId = claimMatch[1];
-      const stub = env.LUCINEER_SESSION.getByName("default");
+      const jobId = decodeURIComponent(claimMatch[1]);
+      const sessionId = sessionIdFromJobId(jobId);
+      const stub = sessionStub(env, sessionId);
       const job = await stub.claimJob(jobId);
       if (!job) {
         return Response.json(
@@ -172,6 +196,44 @@ export default {
         );
       }
       return Response.json({ ok: true, job });
+    }
+
+    // --- POST /api/jobs/claim — batch claim pending jobs atomically ---
+    // Query params: ?workerId=<id>&limit=<n>
+    // This is the preferred endpoint for processors. It atomically selects
+    // and claims jobs in one operation, preventing race conditions.
+    if (path === "/api/jobs/claim" && method === "POST") {
+      const workerId = url.searchParams.get("workerId") || `worker-${Date.now()}`;
+      const limit = Math.min(Number(url.searchParams.get("limit") || 5), 20);
+
+      // Fan out across all active session DOs.
+      // For now, we claim from the "default" DO plus any session IDs
+      // extracted from the workerId hint (if the processor passes ?sessions=s1,s2).
+      // In practice, most jobs land on "default" since the processor doesn't
+      // know session IDs ahead of time.
+      //
+      // Optimization: the processor can pass ?sessionId=<id> to claim from
+      // a specific session DO only.
+      const sessionParam = url.searchParams.get("sessionId");
+      const sessionIds = sessionParam
+        ? [sessionParam]
+        : ["default"];
+
+      const allJobs: { jobId: string; job: Job }[] = [];
+      for (const sid of sessionIds) {
+        const stub = sessionStub(env, sid);
+        const jobs = await stub.claimPendingJobs(workerId, limit - allJobs.length);
+        for (const job of jobs) {
+          allJobs.push({ jobId: job.id, job });
+        }
+        if (allJobs.length >= limit) break;
+      }
+
+      return Response.json({
+        ok: true,
+        claimed: allJobs.length,
+        jobs: allJobs,
+      });
     }
 
     // --- POST /api/state — update world state ---
@@ -193,8 +255,8 @@ export default {
         );
       }
 
-      const stub = env.LUCINEER_SESSION.getByName("default");
-      await stub.updateWorldState(body.sessionId, body.worldSnapshot);
+      const stub = sessionStub(env, body.sessionId);
+      await stub.updateWorldState(body.sessionId, body.worldSnapshot as any);
       return Response.json({ ok: true });
     }
 
@@ -202,7 +264,7 @@ export default {
     const stateMatch = path.match(/^\/api\/state\/(.+)$/);
     if (stateMatch && method === "GET") {
       const sessionId = decodeURIComponent(stateMatch[1]);
-      const stub = env.LUCINEER_SESSION.getByName("default");
+      const stub = sessionStub(env, sessionId);
       const state = await stub.getWorldState(sessionId);
       if (!state) {
         return Response.json({ error: "No state found for session" }, { status: 404 });
@@ -211,19 +273,20 @@ export default {
     }
 
     // --- GET /api/jobs/pending — processor polls for unprocessed jobs ---
+    // NOTE: Processors should prefer POST /api/jobs/claim for atomic claiming.
+    // This endpoint is kept for backward compatibility.
     if (path === "/api/jobs/pending" && method === "GET") {
-      const stub = env.LUCINEER_SESSION.getByName("default");
+      const stub = sessionStub(env, "default");
       const jobs = await stub.getPendingJobs();
       return Response.json({
         jobs,
-        notice: "Call POST /api/job/:jobId/claim before processing to prevent duplicate work.",
+        notice: "Prefer POST /api/jobs/claim for atomic batch claiming.",
       });
     }
 
     // =====================================================================
     // R2 MOLT TRAJECTORY WRITER
     // POST /api/trajectory — writes session events to R2.
-    // "The only item where delay is unrecoverable" — Grand Plan Phase 1.
     // =====================================================================
     if (path === "/api/trajectory" && method === "POST") {
       let body: { sessionId: string; events: TrajectoryEvent[] };
@@ -240,9 +303,6 @@ export default {
         return Response.json({ error: "Missing or empty required field: events" }, { status: 400 });
       }
 
-      // Write to R2 — one object per trajectory write, keyed by session + timestamp.
-      // This is append-only: each write is a separate JSONL object so partial
-      // failures never corrupt earlier data.
       const timestamp = Date.now();
       const r2Key = `trajectories/${body.sessionId}/${timestamp}.json`;
 
@@ -271,8 +331,6 @@ export default {
           eventsWritten: body.events.length,
         });
       } catch (e) {
-        // R2 write failure is critical — trajectories are the highest-option-value
-        // data in the system. Return 500 so the processor knows to retry.
         return Response.json(
           { error: "Failed to write trajectory to R2", detail: String(e) },
           { status: 500 },

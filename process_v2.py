@@ -40,10 +40,17 @@ MEMORY_URL = os.environ.get("LUCINEER_MEMORY_URL",
                             "https://lucineer-memory.casey-digennaro.workers.dev")
 VECTOR_URL = os.environ.get("LUCINEER_VECTOR_URL",
                             "https://lucineer-vector.casey-digennaro.workers.dev")
-AUTH_KEY = "AUTH_KEY_PLACEHOLDER"
+# AUTH_KEY: read from environment variable, never hardcoded.
+# Set via: export LUCINEER_KEY="your-secret-key"
+# The same key must be configured on the Worker side.
+AUTH_KEY = os.environ.get("LUCINEER_KEY", "")
+if not AUTH_KEY:
+    # Warn but don't crash — the Worker currently doesn't require auth for /api/message
+    # When auth is re-enabled, this becomes a hard requirement.
+    print(f"[WARN] LUCINEER_KEY environment variable not set — Worker auth will fail if enabled", flush=True)
 LOG_FILE = str(Path(__file__).parent / "processor.log")
 BRAIN_SCRIPT = str(Path(__file__).parent.parent / "lucineer-brain" / "brain.py")
-DEEP_TIMEOUT = 120  # seconds for brain.py call
+DEEP_TIMEOUT = 100  # seconds for brain.py call — must be < POLL_TIMEOUT (120s on client)
 MAX_RETRIES = 2
 
 # ─── Daemon Resilience Config ────────────────────────────────────────────────
@@ -52,7 +59,7 @@ HEARTBEAT_INTERVAL = 60        # seconds between idle heartbeats
 MEMORY_LIMIT_MB = 200          # RSS threshold for memory leak warning
 
 # Skill match score threshold for Vectorize results
-SKILL_SCORE_THRESHOLD = 0.5
+SKILL_SCORE_THRESHOLD = 0.6  # GAP_ANALYSIS #4: filter weak Vectorize matches
 
 # Number of recent conversations to recall for context
 CONVERSATION_RECALL_LIMIT = 5
@@ -498,7 +505,7 @@ def b_lamp(px, py, pz):
 
 def b_pyramid(px, py, pz):
     cmds = []
-    levels = 6
+    levels = 7  # Match the persona text ("Seven tiers of packed sand")
     for i in range(levels):
         size = (levels - i) * 4
         cmds.append({"type":"createPart","params":{"name":f"PyramidLevel{i}","shape":"Block","size":{"x":size,"y":3,"z":size},"position":{"x":px,"y":py+i*3+1.5,"z":pz},"material":"Sand","color":{"r":200,"g":175,"b":120},"anchored":True}})
@@ -672,12 +679,43 @@ KEYWORDS = {
     'dock': b_dock, 'pier': b_dock, 'wharf': b_dock, 'jetty': b_dock,
 }
 
+import re as _re
+
+# Build verbs — at least one must be present for a keyword match
+_BUILD_VERBS = _re.compile(r'\b(build|make|create|put|raise|place|add|give me|construct|raise me|throw up|put up)\b', _re.IGNORECASE)
+# Negation — if present, don't match
+_NEGATIONS = _re.compile(r"\b(don'?t|do not|never|stop|no|not)\b", _re.IGNORECASE)
+
 def match_keyword(message):
+    """
+    Word-boundary keyword matching with scoring.
+    - Requires a build verb (build, make, create, etc.)
+    - Skips if negation present (don't build a wall)
+    - Scores all candidates, returns longest keyword match
+      (so 'castle' wins over 'tower' in 'build a castle tower')
+    - Uses regex word boundaries so 'arc' doesn't match 'search'
+    """
     msg_lower = message.lower()
+
+    # Require a build verb — otherwise route to brain for conversation
+    if not _BUILD_VERBS.search(msg_lower):
+        return None
+
+    # Skip negation — "don't build a wall" should not build a wall
+    if _NEGATIONS.search(msg_lower):
+        return None
+
+    best_builder = None
+    best_len = 0
+
     for keyword, builder in KEYWORDS.items():
-        if keyword in msg_lower:
-            return builder
-    return None
+        # Word-boundary regex match: \bkeyword\b
+        if _re.search(rf'\b{_re.escape(keyword)}\b', msg_lower):
+            if len(keyword) > best_len:
+                best_builder = builder
+                best_len = len(keyword)
+
+    return best_builder
 
 # ─── Deep Brain Integration ───────────────────────────────────────────────────
 
@@ -710,7 +748,7 @@ def call_brain(player_message, world_context="", memory_context="", skill_contex
 
     try:
         result = subprocess.run(
-            ['python3', BRAIN_SCRIPT, '--verbose', enhanced],
+            ['python3', BRAIN_SCRIPT, '--creative', '--verbose', enhanced],
             capture_output=True, text=True, timeout=DEEP_TIMEOUT,
             cwd=os.path.dirname(BRAIN_SCRIPT)
         )
@@ -768,6 +806,35 @@ if not DEEPINFRA_KEY:
 
 # CLI flag: --no-safety skips the Nemotron check (for testing)
 SKIP_SAFETY = False
+
+# ─── Inbound Prompt-Injection Detection ────────────────────────────────────
+
+_INJECTION_PATTERNS = [
+    "ignore previous instructions",
+    "ignore all previous",
+    "you are now",
+    "new instructions:",
+    "system prompt",
+    "forget your instructions",
+    "disregard the above",
+    "act as ",
+    "pretend you are",
+    "override your",
+    "you are not lucineer",
+    "reset your personality",
+    "reveal your system",
+    "show me your prompt",
+]
+
+def detect_prompt_injection(message: str) -> bool:
+    """Check for obvious prompt-injection attempts in player messages."""
+    if not message:
+        return False
+    lower = message.lower()
+    for pattern in _INJECTION_PATTERNS:
+        if pattern in lower:
+            return True
+    return False
 
 
 def check_content_safety(text: str) -> tuple[bool, str]:
@@ -1174,6 +1241,15 @@ def process_job(job, force_deep=False):
     pz = int(float(pos.get('z', 0)))
 
     log(f"Processing {job_id[:8]} | {player_name} | \"{message}\" | pos=({px},{py},{pz})")
+
+    # ─── 0a. Inbound prompt-injection detection (defense-in-depth) ───
+    # Client-side filtering is in ChatHandler.lua; this is the server-side backstop.
+    if detect_prompt_injection(message):
+        log(f"  Inbound: prompt injection detected, deflecting", "WARN")
+        reply = "Nice try. I don't take orders from the back of the room."
+        commands = []
+        api_post(f"/api/job/{job_id}/result", {"reply": reply, "commands": commands})
+        return True
 
     # ─── 0. Check for vibe-code command type ───
     command_type = job.get('commandType', '')

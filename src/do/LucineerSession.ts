@@ -6,25 +6,30 @@ import type {
   WorldSnapshot,
   MessageHistoryEntry,
   BuildCommand,
+  LucineerSessionRPC,
 } from "../types";
 
-/** Lease duration: a claimed job is considered stale after 5 minutes. */
-const CLAIM_LEASE_MS = 5 * 60 * 1000;
+/** Lease duration: a claimed job is considered stale after 3 minutes. */
+const LEASE_MS = 3 * 60 * 1000;
 /** Max claim attempts before a job is permanently errored. */
 const MAX_ATTEMPTS = 3;
 /** Rate limit: max messages per session per window. */
 const RATE_LIMIT_MAX = 10;
 /** Rate limit window in ms (1 minute). */
 const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+/** Pruning: jobs older than this are deleted. */
+const PRUNE_AFTER_MS = 24 * 60 * 60 * 1000; // 24h
+/** Alarm interval for pruning sweep. */
+const ALARM_INTERVAL_MS = 60 * 60 * 1000; // 1h
 
-interface StoredMessageHistory {
-  entries: MessageHistoryEntry[];
-}
+// SQL rows are returned as Record<string, SqlStorageValue> by the DO SQLite API
+type SqlRow = Record<string, SqlStorageValue>;
 
-export class LucineerSession extends DurableObject {
-  constructor(ctx: DurableObjectState, env: unknown) {
-    super(ctx, env as never);
-    // Initialize SQLite schema with claimed_at and attempts columns
+export class LucineerSession extends DurableObject<Env> {
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+
+    // Initialize SQLite schema with all columns
     this.ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS jobs (
         id TEXT PRIMARY KEY,
@@ -39,6 +44,8 @@ export class LucineerSession extends DurableObject {
         created_at INTEGER NOT NULL,
         completed_at INTEGER,
         claimed_at INTEGER,
+        claimed_by TEXT,
+        lease_expires_at INTEGER,
         attempts INTEGER NOT NULL DEFAULT 0
       );
 
@@ -60,62 +67,97 @@ export class LucineerSession extends DurableObject {
 
       CREATE INDEX IF NOT EXISTS idx_jobs_session ON jobs(session_id);
       CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
+      CREATE INDEX IF NOT EXISTS idx_jobs_claimed ON jobs(claimed_at);
       CREATE INDEX IF NOT EXISTS idx_history_session ON message_history(session_id);
     `);
 
-    // Migrate existing tables: add claimed_at and attempts if missing
-    try {
-      this.migrateSchema();
-    } catch (e) {
-      console.error("Migration failed:", e);
-    }
+    // Migrate existing tables: add columns if missing
+    this.migrateSchema();
 
-    // Create indexes on migrated columns AFTER migration ensures columns exist
-    try {
-      this.ctx.storage.sql.exec(
-        `CREATE INDEX IF NOT EXISTS idx_jobs_claimed ON jobs(claimed_at)`
-      );
-    } catch { /* index may already exist */ }
+    // Schedule first pruning alarm if not already set
+    this.ctx.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS).catch(() => {});
   }
 
   /**
    * Add columns to pre-existing tables without dropping data.
-   * SQLite's ALTER TABLE ADD COLUMN is idempotent-safe with this pattern.
+   * SQLite's ALTER TABLE ADD COLUMN fails silently if the column already exists.
    */
   private migrateSchema(): void {
-    try {
-      this.ctx.storage.sql.exec(`ALTER TABLE jobs ADD COLUMN claimed_at INTEGER`);
-    } catch { /* column already exists */ }
-    try {
-      this.ctx.storage.sql.exec(`ALTER TABLE jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`);
-    } catch { /* column already exists */ }
+    const additions = [
+      "ALTER TABLE jobs ADD COLUMN claimed_at INTEGER",
+      "ALTER TABLE jobs ADD COLUMN claimed_by TEXT",
+      "ALTER TABLE jobs ADD COLUMN lease_expires_at INTEGER",
+      "ALTER TABLE jobs ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0",
+    ];
+    for (const sql of additions) {
+      try {
+        this.ctx.storage.sql.exec(sql);
+      } catch {
+        // column already exists — expected
+      }
+    }
 
     // Migrate old 'processing' status to 'pending' so the new claiming flow picks them up
-    this.ctx.storage.sql.exec(
-      `UPDATE jobs SET status = 'pending' WHERE status = 'processing'`,
-    );
+    try {
+      this.ctx.storage.sql.exec(
+        `UPDATE jobs SET status = 'pending' WHERE status = 'processing'`,
+      );
+    } catch {
+      // table may not exist yet on first deploy
+    }
   }
 
   // Diagnostic — return schema info
   async diag(): Promise<Record<string, unknown>> {
     try {
       const cursor = this.ctx.storage.sql.exec("PRAGMA table_info(jobs)");
-      const cols = cursor.toArray().map((r: Record<string, unknown>) => r["name"]);
+      const cols = cursor.toArray().map((r: SqlRow) => String(r["name"]));
       const countCursor = this.ctx.storage.sql.exec("SELECT COUNT(*) as n FROM jobs");
-      const count = countCursor.toArray()[0] as Record<string, unknown>;
-      return { columns: cols, totalJobs: count["n"], status: "ok" };
+      const count = countCursor.toArray()[0] as SqlRow;
+      return { columns: cols, totalJobs: Number(count["n"]), status: "ok" };
     } catch (e) {
       return { error: String(e), status: "fail" };
     }
   }
 
-  // Generate a random job ID
-  private generateJobId(): string {
-    const bytes = new Uint8Array(16);
+  /**
+   * Generate a job ID that encodes the session ID so getJob can route
+   * to the correct Durable Object without a lookup.
+   * Format: `<urlEncodedSessionId>.<randomHex>`
+   */
+  private generateJobId(sessionId: string): string {
+    const bytes = new Uint8Array(12);
     crypto.getRandomValues(bytes);
-    return Array.from(bytes)
+    const rand = Array.from(bytes)
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("");
+    return `${encodeURIComponent(sessionId)}.${rand}`;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Alarm — periodic pruning of old jobs and history
+  // ---------------------------------------------------------------------------
+
+  async alarm(): Promise<void> {
+    const cutoff = Date.now() - PRUNE_AFTER_MS;
+
+    // Delete completed/errored jobs older than 24h
+    this.ctx.storage.sql.exec(
+      `DELETE FROM jobs WHERE completed_at IS NOT NULL AND completed_at < ?`,
+      cutoff,
+    );
+
+    // Delete old message history
+    this.ctx.storage.sql.exec(
+      `DELETE FROM message_history WHERE timestamp < ?`,
+      cutoff,
+    );
+
+    // Reclaim stale claimed jobs (lease expired, within retry limit)
+    this.cleanupStaleJobs();
+
+    // Schedule next sweep
+    await this.ctx.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS);
   }
 
   // ---------------------------------------------------------------------------
@@ -130,14 +172,13 @@ export class LucineerSession extends DurableObject {
     const now = Date.now();
     const windowStart = now - RATE_LIMIT_WINDOW_MS;
 
-    // Count recent jobs from this session
-    const cursor = this.ctx.storage.sql.exec<{ count: number }>(
+    const cursor = this.ctx.storage.sql.exec(
       `SELECT COUNT(*) as count FROM jobs WHERE session_id = ? AND created_at > ?`,
       sessionId,
       windowStart,
     );
-    const row = cursor.toArray()[0];
-    const count = row?.count ?? 0;
+    const row = cursor.toArray()[0] as SqlRow;
+    const count = Number(row?.count ?? 0);
 
     return count < RATE_LIMIT_MAX;
   }
@@ -147,7 +188,7 @@ export class LucineerSession extends DurableObject {
   // ---------------------------------------------------------------------------
 
   async createJob(msg: IncomingMessage): Promise<{ jobId: string }> {
-    const jobId = this.generateJobId();
+    const jobId = this.generateJobId(msg.sessionId);
     const now = Date.now();
 
     this.ctx.storage.sql.exec(
@@ -187,11 +228,11 @@ export class LucineerSession extends DurableObject {
   }
 
   async getJob(jobId: string): Promise<Job | null> {
-    const cursor = this.ctx.storage.sql.exec<Record<string, unknown>>(
+    const cursor = this.ctx.storage.sql.exec(
       `SELECT * FROM jobs WHERE id = ?`,
       jobId,
     );
-    const row = cursor.toArray()[0];
+    const row = cursor.toArray()[0] as SqlRow | undefined;
     if (!row) return null;
 
     return this.rowToJob(row);
@@ -229,42 +270,130 @@ export class LucineerSession extends DurableObject {
   }
 
   // ---------------------------------------------------------------------------
-  // Job claiming — FIX #6
+  // Job claiming — atomic batch claim with lease + retry support
   // ---------------------------------------------------------------------------
 
   /**
-   * Atomically claim a job for processing.
-   * Sets claimed_at = NOW() only if claimed_at is NULL or older than the lease period.
-   * Returns the claimed job, or null if the job was already claimed by another processor.
+   * Atomically claim up to `limit` pending jobs for processing.
    *
-   * This prevents the race condition where two processors both grab the same job.
+   * This is the preferred claiming method over getPendingJobs + claimJob,
+   * because it performs the state transition (pending → claimed) in the same
+   * transaction as the selection, eliminating the race where two processors
+   * both grab the same job.
+   *
+   * Steps:
+   * 1. Reclaim expired leases (status='claimed' AND lease_expires_at < now)
+   *    - If attempts >= MAX_ATTEMPTS → mark as error (dead-letter)
+   *    - Otherwise → reset to 'pending' so they can be re-claimed
+   * 2. Select pending jobs (status='pending', claimed_at IS NULL)
+   * 3. Atomically transition them to 'claimed' with lease expiry
+   */
+  async claimPendingJobs(workerId: string, limit = 5): Promise<Job[]> {
+    const now = Date.now();
+    const leaseExpiresAt = now + LEASE_MS;
+
+    // Step 1: Retire jobs that exceeded max attempts
+    this.ctx.storage.sql.exec(
+      `UPDATE jobs
+       SET status = 'error',
+           error = 'Max attempts (' || ? || ') exceeded — lease expired',
+           completed_at = ?
+       WHERE status = 'claimed'
+         AND lease_expires_at IS NOT NULL
+         AND lease_expires_at < ?
+         AND attempts >= ?`,
+      MAX_ATTEMPTS,
+      now,
+      now,
+      MAX_ATTEMPTS,
+    );
+
+    // Step 2: Reset expired leases back to pending (within retry limit)
+    this.ctx.storage.sql.exec(
+      `UPDATE jobs
+       SET status = 'pending',
+           claimed_at = NULL,
+           claimed_by = NULL,
+           lease_expires_at = NULL
+       WHERE status = 'claimed'
+         AND lease_expires_at IS NOT NULL
+         AND lease_expires_at < ?`,
+      now,
+    );
+
+    // Step 3: Select candidate jobs
+    const cursor = this.ctx.storage.sql.exec(
+      `SELECT * FROM jobs
+       WHERE status = 'pending'
+         AND claimed_at IS NULL
+       ORDER BY created_at ASC
+       LIMIT ?`,
+      limit,
+    );
+    const rows = cursor.toArray() as SqlRow[];
+
+    if (rows.length === 0) return [];
+
+    // Step 4: Atomically claim all selected jobs
+    const ids = rows.map((r) => r["id"] as string);
+    const placeholders = ids.map(() => "?").join(",");
+
+    this.ctx.storage.sql.exec(
+      `UPDATE jobs
+       SET status = 'claimed',
+           claimed_at = ?,
+           claimed_by = ?,
+           lease_expires_at = ?,
+           attempts = attempts + 1
+       WHERE id IN (${placeholders})
+         AND status = 'pending'
+         AND claimed_at IS NULL`,
+      now,
+      workerId,
+      leaseExpiresAt,
+      ...ids,
+    );
+
+    // Step 5: Return the claimed jobs (re-read to get updated values)
+    const claimedCursor = this.ctx.storage.sql.exec(
+      `SELECT * FROM jobs WHERE id IN (${placeholders})`,
+      ...ids,
+    );
+    const claimedRows = claimedCursor.toArray() as SqlRow[];
+
+    return claimedRows.map((row) => this.rowToJob(row));
+  }
+
+  /**
+   * Claim a single job by ID. Used by the per-job claim endpoint.
+   * Less efficient than claimPendingJobs but needed for backward compat.
    */
   async claimJob(jobId: string): Promise<Job | null> {
     const now = Date.now();
-    const leaseExpired = now - CLAIM_LEASE_MS;
+    const leaseExpiresAt = now + LEASE_MS;
 
-    // Atomic conditional update: only claim if unclaimed or lease expired
-    // and the job hasn't exceeded max attempts
-    const cursor = this.ctx.storage.sql.exec<{ changes: number }>(
+    // Atomic conditional update: only claim if pending and unclaimed
+    this.ctx.storage.sql.exec(
       `UPDATE jobs
-       SET claimed_at = ?,
+       SET status = 'claimed',
+           claimed_at = ?,
+           claimed_by = 'single-claim',
+           lease_expires_at = ?,
            attempts = attempts + 1
        WHERE id = ?
          AND status = 'pending'
-         AND (claimed_at IS NULL OR claimed_at < ?)`,
+         AND claimed_at IS NULL`,
       now,
+      leaseExpiresAt,
       jobId,
-      leaseExpired,
     );
 
-    // In Durable Object SQLite, we check if the update affected any rows
-    // by re-querying the job
     const job = await this.getJob(jobId);
     if (!job) return null;
 
-    // Verify we actually claimed it (claimed_at should be close to now)
+    // Check if WE claimed it (claimed_at should be close to now)
     if (job.claimedAt && Math.abs(job.claimedAt - now) < 1000) {
-      // We claimed it. Check if it's now past max attempts.
+      // We claimed it. Check max attempts.
       if ((job.attempts ?? 0) >= MAX_ATTEMPTS) {
         await this.setJobError(jobId, `Max attempts (${MAX_ATTEMPTS}) exceeded`);
         return null;
@@ -272,7 +401,7 @@ export class LucineerSession extends DurableObject {
       return job;
     }
 
-    // Someone else claimed it first
+    // Someone else claimed it first, or it was already claimed
     return null;
   }
 
@@ -283,46 +412,46 @@ export class LucineerSession extends DurableObject {
    */
   async cleanupStaleJobs(): Promise<number> {
     const now = Date.now();
-    const leaseExpired = now - CLAIM_LEASE_MS;
+    const leaseExpired = now - LEASE_MS;
 
-    // Find jobs that have been claimed but the lease has expired and they're still pending
-    // (meaning a processor crashed mid-work)
-    const staleCursor = this.ctx.storage.sql.exec<{ id: string; attempts: number }>(
+    // Find claimed jobs whose lease has expired
+    const staleCursor = this.ctx.storage.sql.exec(
       `SELECT id, attempts FROM jobs
-       WHERE status = 'pending'
-         AND claimed_at IS NOT NULL
-         AND claimed_at < ?`,
+       WHERE status = 'claimed'
+         AND lease_expires_at IS NOT NULL
+         AND lease_expires_at < ?`,
       leaseExpired,
     );
-    const staleJobs = staleCursor.toArray();
+    const staleJobs = staleCursor.toArray() as SqlRow[];
 
     let cleaned = 0;
 
     for (const stale of staleJobs) {
-      if (stale.attempts >= MAX_ATTEMPTS) {
+      const attempts = Number(stale["attempts"] ?? 0);
+      if (attempts >= MAX_ATTEMPTS) {
         // Permanently fail this job
         this.ctx.storage.sql.exec(
           `UPDATE jobs SET status = 'error',
-               error = 'Job timed out after max attempts (' || ? || ') and lease expired',
+               error = 'Job timed out after max attempts and lease expired',
                completed_at = ?
            WHERE id = ?`,
-          MAX_ATTEMPTS,
           now,
-          stale.id,
+          stale["id"],
         );
         cleaned++;
       }
-      // Jobs that haven't hit max attempts stay 'pending' with their claimed_at
-      // so they can be re-claimed by another processor (reset claimed_at to null
-      // so claimJob picks them up again)
     }
 
-    // Reset claimed_at for jobs within retry limit so they can be re-claimed
+    // Reset expired leases back to pending so they can be re-claimed
     this.ctx.storage.sql.exec(
-      `UPDATE jobs SET claimed_at = NULL
-       WHERE status = 'pending'
-         AND claimed_at IS NOT NULL
-         AND claimed_at < ?`,
+      `UPDATE jobs
+       SET status = 'pending',
+           claimed_at = NULL,
+           claimed_by = NULL,
+           lease_expires_at = NULL
+       WHERE status = 'claimed'
+         AND lease_expires_at IS NOT NULL
+         AND lease_expires_at < ?`,
       leaseExpired,
     );
 
@@ -330,7 +459,7 @@ export class LucineerSession extends DurableObject {
   }
 
   // ---------------------------------------------------------------------------
-  // Pending jobs — now with cleanup + claim-aware filtering
+  // Pending jobs — returns unclaimed jobs for backward compat
   // ---------------------------------------------------------------------------
 
   /**
@@ -339,21 +468,22 @@ export class LucineerSession extends DurableObject {
    *   - status = 'pending'
    *   - claimed_at IS NULL (not currently being worked on)
    *
-   * Processors should call claimJob(jobId) immediately after selecting a job
-   * from this list to prevent race conditions with other processors.
+   * NOTE: Processors should prefer claimPendingJobs() for atomic batch claiming.
+   * This endpoint is kept for backward compatibility but does NOT guarantee
+   * that another processor won't grab the same job before you call claimJob().
    */
   async getPendingJobs(): Promise<Job[]> {
     // Clean up stale jobs first
     await this.cleanupStaleJobs();
 
-    const cursor = this.ctx.storage.sql.exec<Record<string, unknown>>(
+    const cursor = this.ctx.storage.sql.exec(
       `SELECT * FROM jobs
        WHERE status = 'pending'
          AND claimed_at IS NULL
        ORDER BY created_at ASC
        LIMIT 10`,
     );
-    const rows = cursor.toArray();
+    const rows = cursor.toArray() as SqlRow[];
     return rows.map((row) => this.rowToJob(row));
   }
 
@@ -373,11 +503,11 @@ export class LucineerSession extends DurableObject {
   }
 
   async getWorldState(sessionId: string): Promise<WorldSnapshot | null> {
-    const cursor = this.ctx.storage.sql.exec<Record<string, unknown>>(
+    const cursor = this.ctx.storage.sql.exec(
       `SELECT snapshot FROM world_state WHERE session_id = ?`,
       sessionId,
     );
-    const row = cursor.toArray()[0];
+    const row = cursor.toArray()[0] as SqlRow | undefined;
     if (!row) return null;
     return JSON.parse(row["snapshot"] as string) as WorldSnapshot;
   }
@@ -390,7 +520,7 @@ export class LucineerSession extends DurableObject {
     sessionId: string,
     limit = 50,
   ): Promise<MessageHistoryEntry[]> {
-    const cursor = this.ctx.storage.sql.exec<MessageHistoryEntry>(
+    const cursor = this.ctx.storage.sql.exec(
       `SELECT job_id, session_id, player_name, message, reply, timestamp
        FROM message_history
        WHERE session_id = ?
@@ -399,14 +529,22 @@ export class LucineerSession extends DurableObject {
       sessionId,
       limit,
     );
-    return cursor.toArray();
+    const rows = cursor.toArray() as SqlRow[];
+    return rows.map((row) => ({
+      jobId: row["job_id"] as string,
+      sessionId: row["session_id"] as string,
+      playerName: row["player_name"] as string,
+      message: row["message"] as string,
+      reply: (row["reply"] as string) ?? undefined,
+      timestamp: row["timestamp"] as number,
+    }));
   }
 
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
 
-  private rowToJob(row: Record<string, unknown>): Job {
+  private rowToJob(row: SqlRow): Job {
     return {
       id: row["id"] as string,
       sessionId: row["session_id"] as string,
@@ -424,6 +562,8 @@ export class LucineerSession extends DurableObject {
       createdAt: row["created_at"] as number,
       completedAt: (row["completed_at"] as number) ?? undefined,
       claimedAt: (row["claimed_at"] as number) ?? undefined,
+      claimedBy: (row["claimed_by"] as string) ?? undefined,
+      leaseExpiresAt: (row["lease_expires_at"] as number) ?? undefined,
       attempts: (row["attempts"] as number) ?? 0,
     };
   }

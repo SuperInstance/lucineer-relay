@@ -1,0 +1,30 @@
+[Unit]
+Description=Lucineer Job Processor v2 (Hybrid Intelligence + Memory)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=eileen
+WorkingDirectory=/home/eileen/projects/lucineer-worker
+Environment=LUCINEER_KEY=AUTH_KEY_PLACEHOLDER
+# Add DeepInfra key if not already in /home/eileen/mcp-deeinfra/.env:
+# Environment=DEEPINFRA_API_KEY=your_key_here
+ExecStart=/usr/bin/python3 /home/eileen/projects/lucineer-worker/process_v2.py --loop --interval 2
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Resource limits — the processor mostly waits for API calls,
+# but enforce a sane memory ceiling to catch leaks.
+MemoryMax=512M
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/eileen/projects/lucineer-worker /home/eileen/projects/lucineer-brain /tmp
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

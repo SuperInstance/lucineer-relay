@@ -75,14 +75,42 @@ async function parseJsonBody<T>(request: Request): Promise<T | undefined> {
 // Worker entry point
 // ---------------------------------------------------------------------------
 
+// The Roblox client isn't subject to browser CORS, but the web client
+// (lucineer.com/play.html) is — every response needs these headers or the
+// browser silently discards it. All endpoints here are either already
+// public/keyless by design or still gated by X-Lucineer-Key, so a
+// permissive origin doesn't change what's reachable, only who can read it.
+const CORS_HEADERS: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, X-Lucineer-Key",
+};
+
+function withCors(response: Response): Response {
+  const headers = new Headers(response.headers);
+  for (const [key, value] of Object.entries(CORS_HEADERS)) {
+    headers.set(key, value);
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: CORS_HEADERS });
+    }
     try {
-      return await handleRequest(request, env);
+      return withCors(await handleRequest(request, env));
     } catch (e) {
-      return Response.json(
-        { error: "Internal server error", detail: String(e) },
-        { status: 500 },
+      return withCors(
+        Response.json(
+          { error: "Internal server error", detail: String(e) },
+          { status: 500 },
+        ),
       );
     }
   },

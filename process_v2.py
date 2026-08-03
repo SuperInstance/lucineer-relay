@@ -1392,6 +1392,7 @@ if __name__ == "__main__":
         log("Safety check: SKIPPED (--no-safety)", "WARN")
 
     if args.mock:
+        mock = {
             "id": f"mock_{int(time.time())}",
             "playerName": "Casey",
             "message": args.mock,

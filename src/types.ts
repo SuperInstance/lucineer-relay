@@ -1,12 +1,16 @@
 // Type definitions for Lucineer Relay Worker
-// Updated: 2026-08-02 — Fixes #3, #5, #6: split auth, job claiming, filtering signal
+// Phase 1 Day 1-3: shared-secret auth, job claiming, R2 trajectory writer
 
 export interface Env {
   LUCINEER_SESSION: DurableObjectNamespace;
-  /** Processor-facing key for /api/jobs/pending, /api/job/:id/result, /api/state endpoints. */
+  /** Processor-facing key for /api/jobs/pending, /api/job/:id/result, /api/state, etc. */
   LUCINEER_INTERNAL_KEY: string;
   /** Legacy key — still accepted on internal endpoints during transition. */
   LUCINEER_KEY?: string;
+  /** Shared secret for inter-service auth (memory/vector ↔ relay). */
+  LUCINEER_SHARED_SECRET?: string;
+  /** R2 bucket for MOLT trajectory logs. */
+  LUCINEER_TRAJECTORIES: R2Bucket;
   OPENCLAW_CALLBACK_URL?: string;
 }
 
@@ -44,6 +48,33 @@ export interface JobResult {
   reply: string;
   commands: BuildCommand[];
   files?: RemoteFile[];
+}
+
+// --- MOLT Trajectory types ---
+
+/**
+ * A single event in a MOLT trajectory.
+ * Trajectories capture the full deep-path of a build job:
+ * perception context, casting decisions, pipeline stages,
+ * sandbox results, and final outcomes.
+ */
+export interface TrajectoryEvent {
+  /** Event type: pipeline stage, perception, decision, etc. */
+  type: string;
+  /** Timestamp (ms epoch) */
+  timestamp: number;
+  /** Job ID this event belongs to */
+  jobId?: string;
+  /** Pipeline stage: intent, plan, sandbox, code, voice, safety */
+  stage?: string;
+  /** Model used for this event */
+  model?: string;
+  /** Channel (SWMIDI channel map) */
+  channel?: number;
+  /** The actual content — prompt, response, decision, etc. */
+  data?: Record<string, unknown>;
+  /** Error mask bits (Layer 1 FLUX constraint engine) */
+  errorMask?: number;
 }
 
 // --- Internal types ---

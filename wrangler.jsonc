@@ -21,6 +21,13 @@
     }
   ],
 
+  "r2_buckets": [
+    {
+      "binding": "LUCINEER_TRAJECTORIES",
+      "bucket_name": "lucineer-trajectories"
+    }
+  ],
+
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1

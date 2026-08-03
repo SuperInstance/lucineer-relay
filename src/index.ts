@@ -1,5 +1,5 @@
 import { LucineerSession } from "./do/LucineerSession";
-import type { Env, IncomingMessage, JobResult } from "./types";
+import type { Env, IncomingMessage, JobResult, TrajectoryEvent } from "./types";
 
 export { LucineerSession };
 
@@ -21,6 +21,10 @@ function isAuthorized(request: Request, env: Env): boolean {
     return true;
   }
   if (env.LUCINEER_KEY && authKey === env.LUCINEER_KEY) {
+    return true;
+  }
+  // Also accept the shared secret for inter-service calls (memory/vector calling relay)
+  if (env.LUCINEER_SHARED_SECRET && authKey === env.LUCINEER_SHARED_SECRET) {
     return true;
   }
   return false;
@@ -46,22 +50,10 @@ export default {
       return Response.json({ status: "ok", timestamp: Date.now() });
     }
 
-    // Diagnostic endpoint — shows DO schema state
-    if (path === "/api/diag" && method === "GET") {
-      try {
-        const stub = env.LUCINEER_SESSION.getByName("default");
-        const result = await stub.diag();
-        return Response.json(result);
-      } catch (e) {
-        return Response.json({ error: String(e) }, { status: 500 });
-      }
-    }
-
     // =====================================================================
     // PUBLIC ENDPOINT — POST /api/message
     // No auth required (the Roblox client doesn't have the internal key).
     // Rate-limited per session to prevent abuse.
-    // FIX #3: Removed auth requirement from this player-facing endpoint.
     // =====================================================================
     if (path === "/api/message" && method === "POST") {
       let body: IncomingMessage;
@@ -78,7 +70,6 @@ export default {
         );
       }
 
-      // FIX #3: Basic rate limiting — max 10 messages per session per minute
       const stub = env.LUCINEER_SESSION.getByName("default");
       const withinLimit = await stub.checkRateLimit(body.sessionId);
       if (!withinLimit) {
@@ -97,34 +88,45 @@ export default {
     // =====================================================================
     // CLIENT POLLING — No auth required
     // The Roblox client polls this endpoint to check job status.
-    // The jobId itself serves as a capability token.
+    // The jobId itself serves as a capability token — knowing the ID
+    // is sufficient to read status. This is the T-Minus model.
     // =====================================================================
-
-    // --- GET /api/job/:jobId — poll job status (client-facing, no auth) ---
-    const jobMatch = path.match(/^\/api\/job\/([\da-f]+)$/);
-    if (jobMatch && method === "GET") {
-      const jobId = jobMatch[1];
-      const stub = env.LUCINEER_SESSION.getByName("default");
-      const job = await stub.getJob(jobId);
-      if (!job) {
-        return Response.json({ error: "Job not found" }, { status: 404 });
+    if (path.startsWith("/api/job/") && method === "GET") {
+      const jobId = path.replace("/api/job/", "");
+      // Guard against sub-paths like /api/job/:id/result on GET
+      if (jobId.includes("/")) {
+        // Sub-path GETs aren't public endpoints — fall through to auth gate
+      } else {
+        const stub = env.LUCINEER_SESSION.getByName("default");
+        const job = await stub.getJob(jobId);
+        if (!job) {
+          return Response.json({ error: "Job not found" }, { status: 404 });
+        }
+        return Response.json(job);
       }
-      return Response.json(job);
     }
 
     // =====================================================================
     // INTERNAL ENDPOINTS — Require processor auth
-    // FIX #3: All endpoints below require LUCINEER_INTERNAL_KEY (or legacy
-    // LUCINEER_KEY). The Roblox client never touches these.
+    // Everything below this point requires a valid X-Lucineer-Key.
+    // The Roblox client never touches these.
     // =====================================================================
     if (!isAuthorized(request, env)) {
       return unauthorized();
     }
 
-    // --- POST /api/job/:jobId/result — OpenClaw posts result ---
-    // FIX #5: The result includes a `filtered: false` field to signal the
-    // client that TextService:FilterStringAsync() MUST be applied before
-    // displaying the reply to any player.
+    // --- GET /api/diag — diagnostic endpoint (now behind auth) ---
+    if (path === "/api/diag" && method === "GET") {
+      try {
+        const stub = env.LUCINEER_SESSION.getByName("default");
+        const result = await stub.diag();
+        return Response.json(result);
+      } catch (e) {
+        return Response.json({ error: String(e) }, { status: 500 });
+      }
+    }
+
+    // --- POST /api/job/:jobId/result — processor posts results ---
     const resultMatch = path.match(/^\/api\/job\/([\da-f]+)\/result$/);
     if (resultMatch && method === "POST") {
       const jobId = resultMatch[1];
@@ -147,10 +149,6 @@ export default {
 
       await stub.setJobResult(jobId, body);
 
-      // FIX #5: Return explicit signal that filtering is required.
-      // The Roblox client MUST call TextService:FilterStringAsync() on
-      // `reply` before displaying it to any player. This is a Roblox
-      // policy requirement for any user-influenced text shown to others.
       return Response.json({
         ok: true,
         jobId,
@@ -159,6 +157,21 @@ export default {
           "TextService:FilterStringAsync() must be called on `reply` before display. " +
           "This is required by Roblox policy for user-influenced text.",
       });
+    }
+
+    // --- POST /api/job/:jobId/claim — atomically claim a job ---
+    const claimMatch = path.match(/^\/api\/job\/([\da-f]+)\/claim$/);
+    if (claimMatch && method === "POST") {
+      const jobId = claimMatch[1];
+      const stub = env.LUCINEER_SESSION.getByName("default");
+      const job = await stub.claimJob(jobId);
+      if (!job) {
+        return Response.json(
+          { ok: false, error: "Job already claimed or not found" },
+          { status: 409 },
+        );
+      }
+      return Response.json({ ok: true, job });
     }
 
     // --- POST /api/state — update world state ---
@@ -197,35 +210,74 @@ export default {
       return Response.json(state);
     }
 
-    // --- GET /api/jobs/pending — OpenClaw polls for unprocessed jobs ---
-    // FIX #6: Returns only jobs that are unclaimed (claimed_at IS NULL).
-    // Processors should call claimJob(jobId) immediately after selecting
-    // a job to prevent duplicate processing.
+    // --- GET /api/jobs/pending — processor polls for unprocessed jobs ---
     if (path === "/api/jobs/pending" && method === "GET") {
       const stub = env.LUCINEER_SESSION.getByName("default");
       const jobs = await stub.getPendingJobs();
       return Response.json({
         jobs,
-        // Remind processors to claim before working
         notice: "Call POST /api/job/:jobId/claim before processing to prevent duplicate work.",
       });
     }
 
-    // --- POST /api/job/:jobId/claim — atomically claim a job ---
-    // FIX #6: Atomic job claiming. Returns the job if the claim succeeded,
-    // or null if another processor already claimed it.
-    const claimMatch = path.match(/^\/api\/job\/([\da-f]+)\/claim$/);
-    if (claimMatch && method === "POST") {
-      const jobId = claimMatch[1];
-      const stub = env.LUCINEER_SESSION.getByName("default");
-      const job = await stub.claimJob(jobId);
-      if (!job) {
+    // =====================================================================
+    // R2 MOLT TRAJECTORY WRITER
+    // POST /api/trajectory — writes session events to R2.
+    // "The only item where delay is unrecoverable" — Grand Plan Phase 1.
+    // =====================================================================
+    if (path === "/api/trajectory" && method === "POST") {
+      let body: { sessionId: string; events: TrajectoryEvent[] };
+      try {
+        body = (await request.json()) as { sessionId: string; events: TrajectoryEvent[] };
+      } catch {
+        return Response.json({ error: "Invalid JSON" }, { status: 400 });
+      }
+
+      if (!body.sessionId) {
+        return Response.json({ error: "Missing required field: sessionId" }, { status: 400 });
+      }
+      if (!body.events || !Array.isArray(body.events) || body.events.length === 0) {
+        return Response.json({ error: "Missing or empty required field: events" }, { status: 400 });
+      }
+
+      // Write to R2 — one object per trajectory write, keyed by session + timestamp.
+      // This is append-only: each write is a separate JSONL object so partial
+      // failures never corrupt earlier data.
+      const timestamp = Date.now();
+      const r2Key = `trajectories/${body.sessionId}/${timestamp}.json`;
+
+      const payload = {
+        sessionId: body.sessionId,
+        timestamp,
+        events: body.events,
+      };
+
+      try {
+        await env.LUCINEER_TRAJECTORIES.put(
+          r2Key,
+          JSON.stringify(payload),
+          {
+            customMetadata: {
+              sessionId: body.sessionId,
+              eventCount: String(body.events.length),
+              timestamp: String(timestamp),
+            },
+          },
+        );
+
+        return Response.json({
+          ok: true,
+          key: r2Key,
+          eventsWritten: body.events.length,
+        });
+      } catch (e) {
+        // R2 write failure is critical — trajectories are the highest-option-value
+        // data in the system. Return 500 so the processor knows to retry.
         return Response.json(
-          { ok: false, error: "Job already claimed or not found" },
-          { status: 409 },
+          { error: "Failed to write trajectory to R2", detail: String(e) },
+          { status: 500 },
         );
       }
-      return Response.json({ ok: true, job });
     }
 
     // --- 404 ---

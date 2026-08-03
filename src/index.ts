@@ -90,53 +90,17 @@ export default {
 
       const { jobId } = await stub.createJob(body);
 
-      // Asynchronously forward to OpenClaw (push path).
-      // FIX #6d: Make push failure non-fatal — the processor also polls.
-      // The job exists in the DO regardless; if push fails, polling picks it up.
-      const callbackUrl = `${url.origin}/api/job/${jobId}/result`;
-      const openclawPayload = {
-        jobId,
-        sessionId: body.sessionId,
-        playerName: body.playerName,
-        message: body.message,
-        playerState: body.playerState ?? null,
-        worldSnapshot: body.worldSnapshot ?? null,
-        callbackUrl,
-      };
-
-      const callbackBase =
-        env.OPENCLAW_CALLBACK_URL ||
-        "${OPENCLAW_CALLBACK_URL}";
-
-      // Fire and forget — don't fail the request if push is unavailable.
-      // The processor also polls /api/jobs/pending, so the job will be picked up.
-      try {
-        await fetch(callbackBase, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(openclawPayload),
-        });
-      } catch (err) {
-        // Push failed — log and continue. The polling processor will pick this up.
-        console.warn(
-          `[lucineer] Push to processor failed (job ${jobId}); falling back to poll. ` +
-            `Error: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
-
+      // The processor polls /api/jobs/pending — no push path needed.
       return Response.json({ jobId, status: "processing" });
     }
 
     // =====================================================================
-    // INTERNAL ENDPOINTS — Require processor auth
-    // FIX #3: All endpoints below require LUCINEER_INTERNAL_KEY (or legacy
-    // LUCINEER_KEY). The Roblox client never touches these.
+    // CLIENT POLLING — No auth required
+    // The Roblox client polls this endpoint to check job status.
+    // The jobId itself serves as a capability token.
     // =====================================================================
-    if (!isAuthorized(request, env)) {
-      return unauthorized();
-    }
 
-    // --- GET /api/job/:jobId — poll job status ---
+    // --- GET /api/job/:jobId — poll job status (client-facing, no auth) ---
     const jobMatch = path.match(/^\/api\/job\/([\da-f]+)$/);
     if (jobMatch && method === "GET") {
       const jobId = jobMatch[1];
@@ -146,6 +110,15 @@ export default {
         return Response.json({ error: "Job not found" }, { status: 404 });
       }
       return Response.json(job);
+    }
+
+    // =====================================================================
+    // INTERNAL ENDPOINTS — Require processor auth
+    // FIX #3: All endpoints below require LUCINEER_INTERNAL_KEY (or legacy
+    // LUCINEER_KEY). The Roblox client never touches these.
+    // =====================================================================
+    if (!isAuthorized(request, env)) {
+      return unauthorized();
     }
 
     // --- POST /api/job/:jobId/result — OpenClaw posts result ---

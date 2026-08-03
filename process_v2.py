@@ -254,12 +254,241 @@ def summarize_conversations(conversations):
 
     return "Recent conversation:\n" + "\n".join(turns)
 
+# ─── Session Memory Cache ─────────────────────────────────────────────────────
+# In-process LRU cache of recent interactions per player.
+# Avoids repeated D1 API calls and enables fast conversation lookup for
+# context injection and "you said earlier" references.
+
+from collections import deque, OrderedDict
+
+CACHE_MAX_INTERACTIONS = 10    # last N player+assistant turns to keep per player
+CACHE_TTL_SECONDS = 3600       # 1 hour idle expiry per player entry
+CACHE_MAX_PLAYERS = 100        # upper bound on distinct players in cache
+
+class Interaction:
+    __slots__ = ('timestamp', 'player_message', 'assistant_reply', 'turn_count')
+    def __init__(self, player_message, assistant_reply, turn_count=0):
+        self.timestamp = time.time()
+        self.player_message = player_message
+        self.assistant_reply = assistant_reply
+        self.turn_count = turn_count
+
+class SessionMemoryCache:
+    """
+    In-memory cache tracking the last N interactions per player.
+    Thread-safe enough for the single-threaded processor loop.
+    Provides fast context assembly without hitting D1 on every job.
+    """
+    def __init__(self, max_interactions=CACHE_MAX_INTERACTIONS,
+                 ttl=CACHE_TTL_SECONDS, max_players=CACHE_MAX_PLAYERS):
+        self._players = OrderedDict()  # player_name -> deque of Interaction
+        self._max_interactions = max_interactions
+        self._ttl = ttl
+        self._max_players = max_players
+
+    def _evict_expired(self):
+        """Drop players whose last interaction is older than TTL."""
+        now = time.time()
+        expired = []
+        for name, deq in self._players.items():
+            if deq and (now - deq[-1].timestamp) > self._ttl:
+                expired.append(name)
+            elif not deq:
+                expired.append(name)
+        for name in expired:
+            del self._players[name]
+
+    def add(self, player_name, player_message, assistant_reply):
+        """Record a full interaction turn (player msg + Lucineer reply)."""
+        if not player_name or not player_message:
+            return
+
+        self._evict_expired()
+
+        if player_name not in self._players:
+            # Enforce max_players — drop least-recently-used player
+            if len(self._players) >= self._max_players:
+                self._players.popitem(last=False)
+            self._players[player_name] = deque(maxlen=self._max_interactions)
+
+        turn = len(self._players[player_name]) + 1
+        self._players[player_name].append(
+            Interaction(player_message, assistant_reply, turn_count=turn)
+        )
+
+    def get_interactions(self, player_name):
+        """Return list of Interaction objects for a player (most recent first)."""
+        self._evict_expired()
+        deq = self._players.get(player_name)
+        if deq is None:
+            return []
+        return list(deq)
+
+    def get_player_context(self, player_name, current_message=None):
+        """
+        Build a compact context string from cached interactions
+        for injection into the brain prompt. Excludes the current message
+        (which is already the primary prompt) to avoid redundancy.
+        """
+        interactions = self.get_interactions(player_name)
+        if not interactions:
+            return ""
+
+        # Exclude the most recent turn if it matches current_message
+        # (the player just sent this — it's already the main prompt)
+        recent = list(interactions)
+        if current_message and recent:
+            last = recent[-1]
+            if last.player_message.strip().lower() == current_message.strip().lower():
+                recent = recent[:-1]
+
+        if not recent:
+            return ""
+
+        lines = ["[Session context — what the player and Lucineer said recently:]"]
+        for ix in recent[-5:]:  # last 5 cached turns
+            pmsg = ix.player_message[:150]
+            rply = ix.assistant_reply[:100] if ix.assistant_reply else ""
+            lines.append(f"  Player: \"{pmsg}\"")
+            if rply:
+                lines.append(f"  Lucineer: \"{rply}\"")
+
+        return "\n".join(lines)
+
+    def get_turn_count(self, player_name):
+        """Return the number of cached turns for this player (session depth)."""
+        deq = self._players.get(player_name)
+        return len(deq) if deq else 0
+
+    def get_noteable_mentions(self, player_name, current_message=None):
+        """
+        Scan cached interactions for statements Lucineer should explicitly
+        reference (preferences, names, locations the player has mentioned).
+        Returns a list of reference strings.
+        """
+        interactions = self.get_interactions(player_name)
+        if len(interactions) < 2:
+            return []
+
+        refs = []
+        # Skip the just-submitted message
+        recent = list(interactions)
+        if current_message and recent:
+            last = recent[-1]
+            if last.player_message.strip().lower() == current_message.strip().lower():
+                recent = recent[:-1]
+
+        for ix in recent[-5:]:
+            mentions = _extract_notable_mentions(ix.player_message)
+            for m in mentions:
+                refs.append(m)
+
+        return refs
+
+    def flush_player(self, player_name):
+        """Remove a player from the cache (e.g. on session end)."""
+        self._players.pop(player_name, None)
+
+    def stats(self):
+        """Return cache size info for logging."""
+        self._evict_expired()
+        return {
+            "players_cached": len(self._players),
+            "total_interactions": sum(len(d) for d in self._players.values()),
+        }
+
+# ─── Mention extraction patterns ──────────────────────────────────────────────
+
+# Patterns that indicate something Lucineer should remember and reference later
+_NOTABLE_PATTERNS = [
+    # "I like X", "I love X", "my favorite X"
+    (r"\b(?:I\s+(?:like|love|enjoy|prefer)|my\s+favo(?:u?)rite)\s+(.+?)(?:[\.\,\!\?]|$)", "preference"),
+    # "I need X", "I want X"
+    (r"\bI\s+(?:need|want|really\s+want)\s+(.+?)(?:[\.\,\!\?]|$)", "desire"),
+    # "my name is X", "call me X"
+    (r"\b(?:my\s+name\s+is|call\s+me|I'm\s+called)\s+(\w+)", "name"),
+    # "I'm building X", "I built X"
+    (r"\b(?:I(?:'m|\s+am)?\s+(?:building|making|working\s+on))\s+(.+?)(?:[\.\,\!\?]|$)", "project"),
+    # "last time you X", "earlier you X" — player referencing Lucineer's prior actions
+    (r"\b(?:last\s+time|earlier|before)\s+you\s+(.+?)(?:[\.\,\!\?]|$)", "recall"),
+    # "I hate X", "I don't like X"
+    (r"\bI\s+(?:hate|dislike|can'?t\s+stand)\s+(.+?)(?:[\.\,\!\?]|$)", "aversion"),
+    # "next I want to X"
+    (r"\bnext\s+(?:I\s+want\s+to|I'll|I\s+will)\s+(.+?)(?:[\.\,\!\?]|$)", "intent"),
+]
+
+def _extract_notable_mentions(message):
+    """Extract notable statements from a player message for future reference."""
+    if not message:
+        return []
+    mentions = []
+    for pattern, category in _NOTABLE_PATTERNS:
+        match = _re.search(pattern, message, _re.IGNORECASE)
+        if match:
+            detail = match.group(1).strip().rstrip('.').rstrip('!').rstrip('?')
+            if detail and len(detail) < 80:
+                mentions.append({"category": category, "detail": detail, "source": "player_message"})
+    return mentions
+
+# ─── Conversation Reference Builder ───────────────────────────────────────────
+
+def build_conversation_references(cache, player_name, current_message):
+    """
+    Produce a prompt-ready string of things Lucineer should explicitly
+    reference from earlier in the conversation. Example output:
+    "The player previously mentioned: {detail}. You might say 'Earlier you told me...'"
+
+    This is separate from the session context — it's for building persona-aware
+    references, not raw history.
+    """
+    mentions = cache.get_noteable_mentions(player_name, current_message)
+    if not mentions:
+        return ""
+
+    # Group by category
+    by_cat = {}
+    for m in mentions:
+        by_cat.setdefault(m["category"], []).append(m["detail"])
+
+    lines = []
+    for cat, details in by_cat.items():
+        unique = list(set(details))[:3]  # max 3 per category
+        if cat == "preference":
+            lines.append(f"- Player likes: {', '.join(unique)}")
+        elif cat == "desire":
+            lines.append(f"- Player wants: {', '.join(unique)}")
+        elif cat == "aversion":
+            lines.append(f"- Player dislikes: {', '.join(unique)}")
+        elif cat == "project":
+            lines.append(f"- Player is working on: {', '.join(unique)}")
+        elif cat == "intent":
+            lines.append(f"- Player plans to: {', '.join(unique)}")
+        elif cat == "recall":
+            lines.append(f"- Player recalled Lucineer doing: {', '.join(unique)}")
+
+    if not lines:
+        return ""
+
+    return (
+        "[Earlier in this conversation, the player revealed these details. "
+        "Reference them naturally if relevant to your reply — say 'You mentioned earlier...' "
+        "or 'Last time we talked you said...':]\n" + "\n".join(lines)
+    )
+
+# ─── Global cache instance ────────────────────────────────────────────────────
+
+_session_cache = SessionMemoryCache()
+
 # ─── Memory: Full Player Context ──────────────────────────────────────────────
 
-def get_player_context(player_name, session_id):
+def get_player_context(player_name, session_id, current_message=None):
     """
-    Fetch full player context from D1 memory.
+    Fetch full player context from D1 memory + in-process session cache.
     Returns profile, recent builds, recent conversations, and a summary string.
+
+    The cache layer provides (1) fast session-context injection without hitting
+    D1 on every turn, and (2) conversation-reference extraction to enable
+    'Earlier you said...' callbacks.
     """
     profile = get_player_profile(player_name)
     recent_builds = get_recent_builds(player_name, limit=5)
@@ -288,6 +517,16 @@ def get_player_context(player_name, session_id):
         build_list = [b.get("description", "?") for b in recent_builds[:3]]
         parts.append(f"Previous builds this session: {', '.join(build_list)}")
 
+    # ── Session cache context (fast, in-memory, last 10 turns) ──
+    cache_ctx = _session_cache.get_player_context(player_name, current_message)
+    if cache_ctx:
+        parts.append(cache_ctx)
+
+    # ── Conversation references ("Earlier you said...") ──
+    refs = build_conversation_references(_session_cache, player_name, current_message)
+    if refs:
+        parts.append(refs)
+
     if conv_summary:
         parts.append(conv_summary)
 
@@ -297,6 +536,7 @@ def get_player_context(player_name, session_id):
         "recent_builds": recent_builds,
         "conversations": conversations,
         "context": context,
+        "cache_turns": _session_cache.get_turn_count(player_name),
     }
 
 # ─── Vectorize: Skill Search ──────────────────────────────────────────────────
@@ -1210,6 +1450,9 @@ def _process_vibe_code_job(job, job_id, player_name, message, session_id):
         log_conversation(session_id, player_name, "assistant",
                          vibe_result.get("reply", "Code generated."))
 
+    # Feed the in-process session cache
+    _session_cache.add(player_name, message, vibe_result.get("reply", "Code generated."))
+
     # Post result to Worker
     try:
         api_post(f"/api/job/{job_id}/result", {
@@ -1265,16 +1508,17 @@ def process_job(job, force_deep=False):
     if world_ctx:
         log(f"  World context: {world_ctx[:100]}")
 
-    # ─── 3. Recall player memory (profile, builds, conversations) ───
+    # ─── 3. Recall player memory (profile, builds, conversations, cache) ───
     memory_ctx = ""
     if session_id and session_id != "mock-session":
-        player_ctx = get_player_context(player_name, session_id)
+        player_ctx = get_player_context(player_name, session_id, current_message=message)
         memory_ctx = player_ctx.get("context", "")
+        cache_turns = player_ctx.get("cache_turns", 0)
         if memory_ctx:
-            log(f"  Memory recall: {memory_ctx[:120]}...")
+            log(f"  Memory recall: {memory_ctx[:120]}... (cache: {cache_turns} turns)")
     else:
         # Mock mode — still try profile + builds for testing
-        player_ctx = get_player_context(player_name, "")
+        player_ctx = get_player_context(player_name, "", current_message=message)
         memory_ctx = player_ctx.get("context", "")
 
     # ─── 4. Search Vectorize for relevant skills ───
@@ -1364,6 +1608,9 @@ def save_to_memory(job_id, session_id, player_name, message, reply, commands,
     # 3. Log Lucineer's reply as assistant conversation
     if session_id and session_id != "mock-session":
         log_conversation(session_id, player_name, "assistant", reply)
+
+    # 4. Feed the in-process session cache (fast recall, no D1 hit needed later)
+    _session_cache.add(player_name, message, reply)
 
 
 # ─── Main Loops ───────────────────────────────────────────────────────────────

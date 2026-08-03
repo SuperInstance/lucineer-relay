@@ -631,6 +631,37 @@ def b_tower(px, py, pz):
         {"type":"addLight","params":{"parent":"TowerLantern","lightType":"PointLight","brightness":5,"range":40,"color":{"r":255,"g":220,"b":100}}},
     ])
 
+def b_lookout(px, py, pz):
+    cmds = []
+    # --- Living tree trunk posts — built around three oaks ---
+    cmds.append({"type":"createPart","params":{"name":"LookoutTreeA","shape":"Cylinder","size":{"x":3,"y":14,"z":3},"position":{"x":px-4,"y":py+7,"z":pz-3},"material":"Wood","color":{"r":80,"g":55,"b":32},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"LookoutTreeB","shape":"Cylinder","size":{"x":3.5,"y":16,"z":3.5},"position":{"x":px+4,"y":py+8,"z":pz-2},"material":"Wood","color":{"r":75,"g":52,"b":30},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"LookoutTreeC","shape":"Cylinder","size":{"x":2.8,"y":13,"z":2.8},"position":{"x":px,"y":py+6.5,"z":pz+4},"material":"Wood","color":{"r":82,"g":57,"b":34},"anchored":True}})
+    # --- Platform: deck planks from a shipwreck barge ---
+    cmds.append({"type":"createPart","params":{"name":"LookoutPlatform","shape":"Block","size":{"x":14,"y":1,"z":14},"position":{"x":px,"y":py+12,"z":pz},"material":"WoodPlanks","color":{"r":120,"g":85,"b":50},"anchored":True}})
+    # --- Railing: mine-cart track iron ---
+    rail_segments = [(-6,0,14,1),(6,0,14,1),(0,-6,1,14),(0,6,1,14)]
+    for i, (dx, dz, sx, sz) in enumerate(rail_segments):
+        cmds.append({"type":"createPart","params":{"name":f"LookoutRail{i}","shape":"Block","size":{"x":sx,"y":1,"z":sz},"position":{"x":px+dx,"y":py+14,"z":pz+dz},"material":"Metal","color":{"r":75,"g":70,"b":65},"anchored":True}})
+    for i, (dx, dz) in enumerate([(-6,-6),(6,-6),(-6,6),(6,6)]):
+        cmds.append({"type":"createPart","params":{"name":f"LookoutPost{i}","shape":"Cylinder","size":{"x":0.5,"y":3,"z":0.5},"position":{"x":px+dx,"y":py+13,"z":pz+dz},"material":"Metal","color":{"r":65,"g":60,"b":55},"anchored":True}})
+    # --- Ladder: steel rungs hammered into the central tree ---
+    for i in range(7):
+        cmds.append({"type":"createPart","params":{"name":f"LookoutRung{i}","shape":"Block","size":{"x":2,"y":0.2,"z":0.4},"position":{"x":px,"y":py+2+i*1.8,"z":pz+4.2},"material":"Metal","color":{"r":70,"g":65,"b":60},"anchored":True}})
+    # --- Roof: canvas tarp from the surveyor's old tent ---
+    cmds.append({"type":"createPart","params":{"name":"LookoutRoof","shape":"Wedge","size":{"x":16,"y":3,"z":16},"position":{"x":px,"y":py+16.5,"z":pz+4},"material":"Plastic","color":{"r":160,"g":150,"b":130},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"LookoutRoofBack","shape":"Wedge","size":{"x":16,"y":3,"z":16},"position":{"x":px,"y":py+16.5,"z":pz-4},"material":"Plastic","color":{"r":155,"g":145,"b":125},"anchored":True}})
+    # --- Telescope: brass tube, bottle-glass lens ---
+    cmds.append({"type":"createPart","params":{"name":"TelescopeBody","shape":"Cylinder","size":{"x":1,"y":3,"z":1},"position":{"x":px+5,"y":py+13,"z":pz+5},"material":"Metal","color":{"r":170,"g":145,"b":80},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"TelescopeLens","shape":"Block","size":{"x":0.8,"y":0.8,"z":0.8},"position":{"x":px+5,"y":py+14.5,"z":pz+5},"material":"Glass","color":{"r":180,"g":210,"b":255},"anchored":True,"transparency":0.3}})
+    # --- Signal lamp: neon, for when smoke won't do ---
+    cmds.append({"type":"createPart","params":{"name":"SignalLamp","shape":"Ball","size":{"x":1.2,"y":1.2,"z":1.2},"position":{"x":px-5,"y":py+13.5,"z":pz-5},"material":"Neon","color":{"r":255,"g":80,"b":80},"anchored":True}})
+    cmds.append({"type":"addLight","params":{"parent":"SignalLamp","lightType":"PointLight","brightness":5,"range":30,"color":{"r":255,"g":80,"b":80}}})
+    # --- Map table ---
+    cmds.append({"type":"createPart","params":{"name":"MapTable","shape":"Block","size":{"x":3,"y":0.2,"z":2},"position":{"x":px-4,"y":py+12.7,"z":pz+3},"material":"WoodPlanks","color":{"r":110,"g":75,"b":45},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"MapTableLeg","shape":"Cylinder","size":{"x":0.3,"y":2,"z":0.3},"position":{"x":px-4,"y":py+11.5,"z":pz+3},"material":"Wood","color":{"r":90,"g":60,"b":35},"anchored":True}})
+    return ("Lookout's lashed to three living oaks — deck planks from a wrecked barge, railing made of mine-cart track, canvas roof from the surveyor's tent. Telescope's brass with a bottle-glass lens, and the signal lamp's red neon for when smoke won't reach. Map table's bolted to the platform. Good view of whatever's coming.", cmds)
+
 def b_house(px, py, pz):
     cmds = []
     # --- Stone foundation skirt (Cobblestone, wider than floor) ---
@@ -730,6 +761,32 @@ def b_wall(px, py, pz):
             cmds.append({"type":"createPart","params":{"name":f"WallCap{i}","shape":"Block","size":{"x":4,"y":1,"z":1.5},"position":{"x":px+i*4-8,"y":py+8.5,"z":pz},"material":"Cobblestone","color":{"r":90,"g":85,"b":80},"anchored":True}})
     return ("Twenty studs of cobble, capped and seated. Walls are easy — it's what you build behind them that matters.", cmds)
 
+def b_fence(px, py, pz):
+    cmds = []
+    # --- Weathered orchard posts ---
+    post_positions = [(-8,0),(-4,0),(0,0),(4,0),(8,0)]
+    for i, (dx, dz) in enumerate(post_positions):
+        cmds.append({"type":"createPart","params":{"name":f"FencePost{i}","shape":"Cylinder","size":{"x":0.6,"y":5,"z":0.6},"position":{"x":px+dx,"y":py+2.5,"z":pz+dz},"material":"Wood","color":{"r":95,"g":65,"b":38},"anchored":True}})
+        cmds.append({"type":"createPart","params":{"name":f"FencePostCap{i}","shape":"Ball","size":{"x":0.8,"y":0.6,"z":0.8},"position":{"x":px+dx,"y":py+5.2,"z":pz+dz},"material":"Wood","color":{"r":85,"g":58,"b":35},"anchored":True}})
+    # --- Rusted wire from the failed farm ---
+    for i in range(len(post_positions)-1):
+        x1 = px + post_positions[i][0]
+        x2 = px + post_positions[i+1][0]
+        mid_x = (x1 + x2) / 2
+        cmds.append({"type":"createPart","params":{"name":f"FenceWireTop{i}","shape":"Block","size":{"x":3.8,"y":0.1,"z":0.1},"position":{"x":mid_x,"y":py+4,"z":pz},"material":"Metal","color":{"r":110,"g":75,"b":55},"anchored":True}})
+        cmds.append({"type":"createPart","params":{"name":f"FenceWireMid{i}","shape":"Block","size":{"x":3.8,"y":0.1,"z":0.1},"position":{"x":mid_x,"y":py+2.5,"z":pz},"material":"Metal","color":{"r":110,"g":75,"b":55},"anchored":True}})
+    # --- Stone gateposts from the demolished manor ---
+    cmds.append({"type":"createPart","params":{"name":"GatePostL","shape":"Block","size":{"x":1.5,"y":6,"z":1.5},"position":{"x":px-10,"y":py+3,"z":pz},"material":"Stone","color":{"r":140,"g":135,"b":130},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"GatePostR","shape":"Block","size":{"x":1.5,"y":6,"z":1.5},"position":{"x":px+10,"y":py+3,"z":pz},"material":"Stone","color":{"r":138,"g":133,"b":128},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"GateCapL","shape":"Block","size":{"x":1.8,"y":0.6,"z":1.8},"position":{"x":px-10,"y":py+6.3,"z":pz},"material":"Slate","color":{"r":120,"g":115,"b":110},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"GateCapR","shape":"Block","size":{"x":1.8,"y":0.6,"z":1.8},"position":{"x":px+10,"y":py+6.3,"z":pz},"material":"Slate","color":{"r":120,"g":115,"b":110},"anchored":True}})
+    # --- Bioluminescent morning glory climbing the wire ---
+    for i, (fx, fy, fz, r, g, b) in enumerate([(-6,3.5,0,255,150,200),(-2,4,0,200,255,150),(2,3,0,150,220,255),(6,4.2,0,255,220,150)]):
+        cmds.append({"type":"createPart","params":{"name":f"FenceFlower{i}","shape":"Ball","size":{"x":0.6,"y":0.6,"z":0.6},"position":{"x":px+fx,"y":py+fy,"z":pz+fz},"material":"Neon","color":{"r":r,"g":g,"b":b},"anchored":True}})
+    # --- Cobblestone edging along the town side ---
+    cmds.append({"type":"createPart","params":{"name":"FenceEdging","shape":"Block","size":{"x":22,"y":0.4,"z":1},"position":{"x":px,"y":py+0.2,"z":pz+1},"material":"Cobblestone","color":{"r":130,"g":125,"b":120},"anchored":True}})
+    return ("Fence runs the old boundary — weathered orchard posts, rusted wire from the failed farm, stone gateposts salvaged from the demolished manor, and bioluminescent morning glory climbing the wire like it owns it. Cobblestone edging on the town side. It doesn't keep much out anymore, but it remembers where the town ended.", cmds)
+
 def b_road(px, py, pz):
     cmds = []
     for i in range(8):
@@ -787,40 +844,69 @@ def b_staircase(px, py, pz):
     cmds.append({"type":"createPart","params":{"name":"StairLanding","shape":"Block","size":{"x":5,"y":1,"z":4},"position":{"x":px,"y":py+10.5,"z":pz+22},"material":"Cobblestone","color":{"r":90,"g":85,"b":80},"anchored":True}})
     return ("Ten steps, landing at the top. Same rise on every one — that's the whole trick to stairs.", cmds)
 
-def b_garden(px, py, pz):
-    cmds = [
-        # --- Soil bed with grass top ---
-        {"type":"createPart","params":{"name":"GardenBed","shape":"Block","size":{"x":20,"y":1,"z":20},"position":{"x":px,"y":py,"z":pz},"material":"Grass","color":{"r":60,"g":130,"b":45},"anchored":True}},
+def b_windmill(px, py, pz):
+    cmds = []
+    # --- Fieldstone base from the original mill, 80 years back ---
+    cmds.append({"type":"createPart","params":{"name":"WindmillBaseStone","shape":"Block","size":{"x":10,"y":3,"z":10},"position":{"x":px,"y":py+1.5,"z":pz},"material":"Cobblestone","color":{"r":135,"g":130,"b":123},"anchored":True}})
+    # --- Brick lower floor, before the lightning strike ---
+    cmds.append({"type":"createPart","params":{"name":"WindmillTowerBrick","shape":"Cylinder","size":{"x":7,"y":8,"z":7},"position":{"x":px,"y":py+7,"z":pz},"material":"Brick","color":{"r":145,"g":120,"b":95},"anchored":True}})
+    # --- Timber upper shaft patched in after the fire ---
+    cmds.append({"type":"createPart","params":{"name":"WindmillTowerWood","shape":"Cylinder","size":{"x":6.5,"y":10,"z":6.5},"position":{"x":px,"y":py+16,"z":pz},"material":"WoodPlanks","color":{"r":115,"g":80,"b":48},"anchored":True}})
+    # --- Metal cap scavenged from the railway yard ---
+    cmds.append({"type":"createPart","params":{"name":"WindmillCap","shape":"Cone","size":{"x":8,"y":4,"z":8},"position":{"x":px,"y":py+23,"z":pz},"material":"Metal","color":{"r":95,"g":90,"b":85},"anchored":True}})
+    # --- Hub and four sails: patched canvas, one red panel from the wagon ---
+    cmds.append({"type":"createPart","params":{"name":"WindmillHub","shape":"Cylinder","size":{"x":1.5,"y":1.5,"z":1.5},"position":{"x":px,"y":py+21,"z":pz},"material":"Metal","color":{"r":80,"g":75,"b":70},"anchored":True}})
+    sail_specs = [
+        (0,-4,1.5,0.3,8,220,210,190),
+        (0,4,1.5,0.3,8,210,200,180),
+        (4,0,8,0.3,1.5,200,190,170),
+        (-4,0,8,0.3,1.5,220,210,190),
     ]
-    # --- Stone path tiles winding through (S-curve) ---
-    path_tiles = [(0,-6),(1,-1),(-1,3),(0,7)]
+    for i, (dx, dz, sx, sy, sz, r, g, b) in enumerate(sail_specs):
+        cmds.append({"type":"createPart","params":{"name":f"WindmillSail{i}","shape":"Block","size":{"x":sx,"y":sy,"z":sz},"position":{"x":px+dx,"y":py+21,"z":pz+dz},"material":"Plastic","color":{"r":r,"g":g,"b":b},"anchored":True,"transparency":0.1}})
+    cmds.append({"type":"createPart","params":{"name":"WindmillRedPatch","shape":"Block","size":{"x":1.2,"y":0.15,"z":2.5},"position":{"x":px+0.2,"y":py+21,"z":pz-3},"material":"Neon","color":{"r":255,"g":90,"b":90},"anchored":True}})
+    # --- Grain chute and door ---
+    cmds.append({"type":"createPart","params":{"name":"WindmillChute","shape":"Cylinder","size":{"x":1,"y":3,"z":1},"position":{"x":px+4,"y":py+4,"z":pz},"material":"Metal","color":{"r":90,"g":85,"b":80},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"WindmillDoor","shape":"Block","size":{"x":2.5,"y":4,"z":0.5},"position":{"x":px,"y":py+2.5,"z":pz+3.8},"material":"Wood","color":{"r":90,"g":60,"b":35},"anchored":True}})
+    # --- Miller's marker lantern ---
+    cmds.append({"type":"createPart","params":{"name":"WindmillLantern","shape":"Ball","size":{"x":1,"y":1,"z":1},"position":{"x":px-3,"y":py+5,"z":pz+3.8},"material":"Neon","color":{"r":255,"g":200,"b":100},"anchored":True}})
+    cmds.append({"type":"addLight","params":{"parent":"WindmillLantern","lightType":"PointLight","brightness":3,"range":15,"color":{"r":255,"g":200,"b":100}}})
+    # --- Flour dust drifting from the chute ---
+    cmds.append({"type":"addParticle","params":{"parent":"WindmillChute","texture":"rbxassetid://241876428","rate":6,"lifetime":{"min":1,"max":3},"speed":{"min":0.5,"max":1.5},"color":{"r":230,"g":220,"b":200},"size":{"min":0.5,"max":1.5},"transparency":0.3,"velocity":{"x":0,"y":-1,"z":0}}})
+    return ("Windmill's turning again — fieldstone base from the original build, brick lower floor, timber patched in after the lightning strike, and a metal cap scavenged from the railway yard. The sails are patched canvas; one panel's still red from the miller's daughter's wagon. Lantern's lit by the door so he finds his way home.", cmds)
+
+def b_garden(px, py, pz):
+    cmds = []
+    # --- Old plaza floor: cracked concrete slabs, nature prying through ---
+    cmds.append({"type":"createPart","params":{"name":"GardenPlazaFloor","shape":"Block","size":{"x":24,"y":0.5,"z":24},"position":{"x":px,"y":py,"z":pz},"material":"Concrete","color":{"r":155,"g":152,"b":146},"anchored":True}})
+    # --- Grass islands pushing up through the plaza ---
+    for i, (gx, gz) in enumerate([(-7,-7),(7,-7),(-7,7),(7,7),(0,0)]):
+        cmds.append({"type":"createPart","params":{"name":f"GrassIsland{i}","shape":"Block","size":{"x":4,"y":0.6,"z":4},"position":{"x":px+gx,"y":py+0.4,"z":pz+gz},"material":"Grass","color":{"r":55+i*5,"g":125+i*5,"b":40+i*3},"anchored":True}})
+    # --- Rusted metal trellis where the bandstand used to be ---
+    cmds.append({"type":"createPart","params":{"name":"GardenTrellis","shape":"Block","size":{"x":8,"y":0.3,"z":0.3},"position":{"x":px-8,"y":py+4,"z":pz-8},"material":"Metal","color":{"r":90,"g":60,"b":45},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"TrellisPostL","shape":"Cylinder","size":{"x":0.4,"y":6,"z":0.4},"position":{"x":px-10,"y":py+3,"z":pz-8},"material":"Metal","color":{"r":85,"g":58,"b":42},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"TrellisPostR","shape":"Cylinder","size":{"x":0.4,"y":6,"z":0.4},"position":{"x":px-6,"y":py+3,"z":pz-8},"material":"Metal","color":{"r":85,"g":58,"b":42},"anchored":True}})
+    # --- Neon vines someone planted after the blackout ---
+    for i, (vx, vz, r, g, b) in enumerate([(-9,-7,150,255,150),(-7,-7,255,220,100),(-8,-6,200,150,255)]):
+        cmds.append({"type":"createPart","params":{"name":f"NeonVine{i}","shape":"Ball","size":{"x":0.8,"y":0.8,"z":0.8},"position":{"x":px+vx,"y":py+3.5,"z":pz+vz},"material":"Neon","color":{"r":r,"g":g,"b":b},"anchored":True}})
+    # --- Central fountain: broken but still weeps ---
+    cmds.append({"type":"createPart","params":{"name":"FountainBowl","shape":"Cylinder","size":{"x":6,"y":1.5,"z":6},"position":{"x":px,"y":py+0.8,"z":pz},"material":"Slate","color":{"r":150,"g":148,"b":142},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"FountainWater","shape":"Cylinder","size":{"x":5,"y":0.4,"z":5},"position":{"x":px,"y":py+1.3,"z":pz},"material":"Glass","color":{"r":170,"g":210,"b":255},"anchored":True,"transparency":0.6}})
+    cmds.append({"type":"createPart","params":{"name":"FountainSpout","shape":"Cylinder","size":{"x":1,"y":2,"z":1},"position":{"x":px,"y":py+1.5,"z":pz},"material":"Concrete","color":{"r":140,"g":138,"b":132},"anchored":True}})
+    cmds.append({"type":"addParticle","params":{"parent":"FountainSpout","texture":"rbxassetid://243660364","rate":8,"lifetime":{"min":1,"max":2},"speed":{"min":0.5,"max":1.5},"color":{"r":200,"g":230,"b":255},"size":{"min":0.5,"max":1.2},"transparency":0.3,"velocity":{"x":0,"y":2,"z":0}}})
+    # --- Bench carved from the fallen chestnut ---
+    cmds.append({"type":"createPart","params":{"name":"GardenBenchSeat","shape":"Block","size":{"x":5,"y":0.4,"z":1.5},"position":{"x":px+7,"y":py+1.5,"z":pz+7},"material":"Wood","color":{"r":110,"g":75,"b":45},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"GardenBenchLegL","shape":"Cylinder","size":{"x":0.4,"y":1.2,"z":0.4},"position":{"x":px+5,"y":py+0.8,"z":pz+7},"material":"Wood","color":{"r":95,"g":65,"b":38},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"GardenBenchLegR","shape":"Cylinder","size":{"x":0.4,"y":1.2,"z":0.4},"position":{"x":px+9,"y":py+0.8,"z":pz+7},"material":"Wood","color":{"r":95,"g":65,"b":38},"anchored":True}})
+    # --- Path stones: slate from the old courthouse steps ---
+    path_tiles = [(0,-8),(2,-4),(-2,0),(1,4),(0,8)]
     for i, (dx, dz) in enumerate(path_tiles):
-        cmds.append({"type":"createPart","params":{"name":f"PathStone{i}","shape":"Block","size":{"x":3,"y":0.3,"z":3},"position":{"x":px+dx*3,"y":py+0.8,"z":dz},"material":"Slate","color":{"r":160,"g":155,"b":148},"anchored":True}})
-    # --- Hedge walls: LeafyGrass blocks ---
-    cmds.append({"type":"createPart","params":{"name":"HedgeN","shape":"Block","size":{"x":20,"y":4,"z":1.5},"position":{"x":px,"y":py+2.5,"z":pz-9.5},"material":"LeafyGrass","color":{"r":70,"g":150,"b":60},"anchored":True}})
-    cmds.append({"type":"createPart","params":{"name":"HedgeS","shape":"Block","size":{"x":20,"y":4,"z":1.5},"position":{"x":px,"y":py+2.5,"z":pz+9.5},"material":"LeafyGrass","color":{"r":65,"g":140,"b":55},"anchored":True}})
-    # --- Garden entrance arch ---
-    cmds.append({"type":"createPart","params":{"name":"ArchTop","shape":"Block","size":{"x":9,"y":1,"z":0.8},"position":{"x":px,"y":py+6.5,"z":pz+9.5},"material":"LeafyGrass","color":{"r":75,"g":155,"b":65},"anchored":True}})
-    # --- Two-tier fountain centerpiece ---
-    cmds.append({"type":"createPart","params":{"name":"FountainBase","shape":"Cylinder","size":{"x":8,"y":1,"z":8},"position":{"x":px,"y":py+1,"z":pz},"material":"Slate","color":{"r":155,"g":150,"b":145},"anchored":True}})
-    cmds.append({"type":"createPart","params":{"name":"FountainWater","shape":"Cylinder","size":{"x":7,"y":0.5,"z":7},"position":{"x":px,"y":py+1.5,"z":pz},"material":"Glass","color":{"r":170,"g":210,"b":255},"anchored":True,"transparency":0.6,"reflectance":0.1}})
-    cmds.append({"type":"createPart","params":{"name":"FountainTier2","shape":"Cylinder","size":{"x":4,"y":2,"z":4},"position":{"x":px,"y":py+2.5,"z":pz},"material":"Concrete","color":{"r":150,"g":148,"b":142},"anchored":True}})
-    cmds.append({"type":"createPart","params":{"name":"FountainTopWater","shape":"Cylinder","size":{"x":3.5,"y":0.3,"z":3.5},"position":{"x":px,"y":py+3.5,"z":pz},"material":"Glass","color":{"r":180,"g":220,"b":255},"anchored":True,"transparency":0.5}})
-    cmds.append({"type":"addParticle","params":{"parent":"FountainTier2","texture":"rbxassetid://243660364","rate":10,"lifetime":{"min":1,"max":2},"speed":{"min":1,"max":2},"color":{"r":200,"g":230,"b":255},"size":{"min":0.5,"max":1.5},"transparency":0.3,"velocity":{"x":0,"y":2,"z":0}}})
-    # --- Flower clusters by color theme ---
-    flower_specs = [(-6,-4,255,100,100),(-6,4,255,200,100),(6,-4,200,100,255),(6,4,255,255,100)]
-    for i, (fx, fz, r, g, b) in enumerate(flower_specs):
-        cmds.append({"type":"createPart","params":{"name":f"FlowerCluster{i}","shape":"Ball","size":{"x":1.2,"y":1.2,"z":1.2},"position":{"x":px+fx,"y":py+1.5,"z":pz+fz},"material":"Neon","color":{"r":r,"g":g,"b":b},"anchored":True}})
-    # --- Bench: Wood with Neon accent ---
-    cmds.append({"type":"createPart","params":{"name":"BenchSeat","shape":"Block","size":{"x":4,"y":0.5,"z":1.5},"position":{"x":px-7,"y":py+2,"z":pz},"material":"WoodPlanks","color":{"r":120,"g":80,"b":45},"anchored":True}})
-    cmds.append({"type":"createPart","params":{"name":"BenchLeg","shape":"Cylinder","size":{"x":0.4,"y":1.5,"z":0.4},"position":{"x":px-7,"y":py+1.5,"z":pz},"material":"Wood","color":{"r":100,"g":65,"b":35},"anchored":True}})
-    cmds.append({"type":"createPart","params":{"name":"BenchAccent","shape":"Block","size":{"x":4,"y":0.2,"z":0.3},"position":{"x":px-7,"y":py+2.4,"z":pz+0.8},"material":"Neon","color":{"r":150,"g":255,"b":180},"anchored":True}})
-    # --- Accent light: fairy glow ---
-    cmds.append({"type":"createPart","params":{"name":"FairyLight","shape":"Ball","size":{"x":0.5,"y":0.5,"z":0.5},"position":{"x":px,"y":py+5,"z":pz},"material":"Neon","color":{"r":255,"g":220,"b":255},"anchored":True}})
-    cmds.append({"type":"addLight","params":{"parent":"FairyLight","lightType":"PointLight","brightness":3,"range":14,"color":{"r":255,"g":220,"b":255}}})
-    # --- Butterfly particles ---
-    cmds.append({"type":"addParticle","params":{"parent":"FairyLight","texture":"rbxassetid://258128463","rate":5,"lifetime":{"min":2,"max":4},"speed":{"min":0.5,"max":2},"color":{"r":255,"g":200,"b":255},"size":{"min":0.3,"max":0.8},"transparency":0.2,"velocity":{"x":0,"y":0,"z":0}}})
-    return ("Garden's laid in — hedge walls, stone path winding through, two-tier fountain at center with water spray. Four flower clusters by color, bench under the fairy light, butterflies in the air. Entrance arch on the south side. Same thing I'd build if I had a yard that wasn't made of fish racks.", cmds)
+        cmds.append({"type":"createPart","params":{"name":f"GardenPath{i}","shape":"Block","size":{"x":2.5,"y":0.2,"z":2.5},"position":{"x":px+dx*1.5,"y":py+0.7,"z":pz+dz*1.5},"material":"Slate","color":{"r":160,"g":155,"b":148},"anchored":True}})
+    # --- Firefly glow and particles ---
+    cmds.append({"type":"createPart","params":{"name":"FireflyCore","shape":"Ball","size":{"x":0.4,"y":0.4,"z":0.4},"position":{"x":px,"y":py+4,"z":pz},"material":"Neon","color":{"r":255,"g":255,"b":150},"anchored":True}})
+    cmds.append({"type":"addLight","params":{"parent":"FireflyCore","lightType":"PointLight","brightness":2,"range":12,"color":{"r":255,"g":255,"b":150}}})
+    cmds.append({"type":"addParticle","params":{"parent":"FireflyCore","texture":"rbxassetid://258128463","rate":6,"lifetime":{"min":2,"max":4},"speed":{"min":0.3,"max":1},"color":{"r":255,"g":255,"b":150},"size":{"min":0.2,"max":0.6},"transparency":0.2,"velocity":{"x":0,"y":0,"z":0}}})
+    return ("Garden's taken back the old plaza — concrete slabs cracked, grass pushing through, rusted trellis where the bandstand stood. Someone strung neon vines after the blackout, and the fountain still weeps. Bench is cut from the chestnut that came down in the storm.", cmds)
 
 def b_dock(px, py, pz):
     cmds = []
@@ -855,43 +941,31 @@ def b_dock(px, py, pz):
 
 def b_lighthouse(px, py, pz):
     cmds = []
-    # --- Striped tower: alternating Slate/Metal bands ---
-    band_specs = [
-        ("Slate",160,155,150, 0,6),
-        ("Metal",120,115,110, 6,10),
-        ("Slate",155,150,145, 10,16),
-        ("Concrete",150,148,145, 16,20),
-        ("Metal",115,110,105, 20,26),
-        ("Slate",150,145,140, 26,32),
-    ]
-    for i, (mat, cr, cg, cb, y_start, y_end) in enumerate(band_specs):
-        h = y_end - y_start
-        cmds.append({"type":"createPart","params":{"name":f"TowerBand{i}","shape":"Cylinder","size":{"x":10,"y":h,"z":10},"position":{"x":px,"y":py+y_start+h/2,"z":pz},"material":mat,"color":{"r":cr,"g":cg,"b":cb},"anchored":True}})
-    # --- Keeper's cottage at base ---
-    cmds.append({"type":"createPart","params":{"name":"CottageFloor","shape":"Block","size":{"x":10,"y":1,"z":8},"position":{"x":px+8,"y":py,"z":pz},"material":"WoodPlanks","color":{"r":110,"g":75,"b":45},"anchored":True}})
-    cmds.append({"type":"createPart","params":{"name":"CottageWalls","shape":"Block","size":{"x":10,"y":6,"z":8},"position":{"x":px+8,"y":py+3,"z":pz},"material":"Wood","color":{"r":130,"g":90,"b":55},"anchored":True,"transparency":0.05}})
-    cmds.append({"type":"createPart","params":{"name":"CottageRoof","shape":"Wedge","size":{"x":11,"y":3,"z":8},"position":{"x":px+8,"y":py+7.5,"z":pz-2},"material":"WoodPlanks","color":{"r":80,"g":45,"b":25},"anchored":True}})
-    cmds.append({"type":"createPart","params":{"name":"CottageWindow","shape":"Block","size":{"x":0.5,"y":2,"z":2},"position":{"x":px+13,"y":py+3,"z":pz},"material":"Neon","color":{"r":255,"g":200,"b":120},"anchored":True}})
-    cmds.append({"type":"addLight","params":{"parent":"CottageWindow","lightType":"PointLight","brightness":3,"range":15,"color":{"r":255,"g":200,"b":120}}})
-    # --- Beacon room: Glass housing with Neon core ---
-    cmds.append({"type":"createPart","params":{"name":"LightRoom","shape":"Block","size":{"x":8,"y":5,"z":8},"position":{"x":px,"y":py+34,"z":pz},"material":"Glass","color":{"r":255,"g":245,"b":200},"anchored":True,"transparency":0.4,"reflectance":0.3}})
-    cmds.append({"type":"createPart","params":{"name":"LightBeacon","shape":"Ball","size":{"x":3,"y":3,"z":3},"position":{"x":px,"y":py+35,"z":pz},"material":"Neon","color":{"r":255,"g":240,"b":100},"anchored":True}})
-    cmds.append({"type":"createPart","params":{"name":"BeaconHousing","shape":"Cylinder","size":{"x":9,"y":1,"z":9},"position":{"x":px,"y":py+37,"z":pz},"material":"Metal","color":{"r":90,"g":85,"b":80},"anchored":True}})
-    # --- Rotating beacon assembly: invisible part + spotlight ---
-    cmds.append({"type":"createPart","params":{"name":"BeaconRotator","shape":"Block","size":{"x":0.5,"y":0.5,"z":0.5},"position":{"x":px,"y":py+36,"z":pz},"material":"Plastic","color":{"r":255,"g":255,"b":255},"anchored":True,"transparency":1}})
-    cmds.append({"type":"addLight","params":{"parent":"BeaconRotator","lightType":"SpotLight","brightness":10,"range":200,"color":{"r":255,"g":245,"b":160},"angle":30}})
-    # --- Fog detector part at mid-tower ---
-    cmds.append({"type":"createPart","params":{"name":"FogDetector","shape":"Block","size":{"x":2,"y":1,"z":2},"position":{"x":px+5,"y":py+16,"z":pz},"material":"Metal","color":{"r":100,"g":95,"b":90},"anchored":True}})
-    # --- Dock extension: WoodPlanks walkway + piles ---
-    cmds.append({"type":"createPart","params":{"name":"LighthouseDock","shape":"Block","size":{"x":4,"y":0.5,"z":12},"position":{"x":px-8,"y":py+0.5,"z":pz},"material":"WoodPlanks","color":{"r":110,"g":75,"b":42},"anchored":True}})
-    cmds.append({"type":"createPart","params":{"name":"LighthouseDockPile1","shape":"Cylinder","size":{"x":0.6,"y":4,"z":0.6},"position":{"x":px-10,"y":py-1,"z":pz-4},"material":"Wood","color":{"r":85,"g":55,"b":30},"anchored":True}})
-    cmds.append({"type":"createPart","params":{"name":"LighthouseDockPile2","shape":"Cylinder","size":{"x":0.6,"y":4,"z":0.6},"position":{"x":px-10,"y":py-1,"z":pz+4},"material":"Wood","color":{"r":85,"g":55,"b":30},"anchored":True}})
-    # --- Wave-washed rocks at base ---
-    cmds.append({"type":"createPart","params":{"name":"BaseRock1","shape":"Ball","size":{"x":4,"y":3,"z":4},"position":{"x":px+4,"y":py+1,"z":pz+5},"material":"Slate","color":{"r":120,"g":115,"b":108},"anchored":True}})
-    cmds.append({"type":"createPart","params":{"name":"BaseRock2","shape":"Ball","size":{"x":3,"y":2.5,"z":3},"position":{"x":px-5,"y":py+0.5,"z":pz-4},"material":"Cobblestone","color":{"r":135,"g":130,"b":122},"anchored":True}})
-    # --- Fog particle at base ---
-    cmds.append({"type":"addParticle","params":{"parent":"BaseRock1","texture":"rbxassetid://258128463","rate":10,"lifetime":{"min":3,"max":6},"speed":{"min":0.5,"max":1.5},"color":{"r":200,"g":210,"b":220},"size":{"min":2,"max":4},"transparency":0.4,"velocity":{"x":0.5,"y":0,"z":0.5}}})
-    return ("Lighthouse is up — six banded stripes, keeper's cottage at the base with a glowing window, dock extension over the water, wave-washed rocks and fog rolling in. Beacon's lit and rotating — she'll sing for anyone out there tonight.", cmds)
+    # --- Foundation: basalt from the cliff quarries — what the island gave ---
+    cmds.append({"type":"createPart","params":{"name":"LighthouseFoundation","shape":"Block","size":{"x":12,"y":3,"z":12},"position":{"x":px,"y":py+1.5,"z":pz},"material":"Basalt","color":{"r":90,"g":88,"b":84},"anchored":True}})
+    # --- Lower tower: shipwreck stone ballast, rounded by tide ---
+    cmds.append({"type":"createPart","params":{"name":"LighthouseBaseTower","shape":"Cylinder","size":{"x":9,"y":12,"z":9},"position":{"x":px,"y":py+9,"z":pz},"material":"Cobblestone","color":{"r":125,"g":120,"b":113},"anchored":True}})
+    # --- Upper tower: whitewashed concrete from the keeper's own mix ---
+    cmds.append({"type":"createPart","params":{"name":"LighthouseMidTower","shape":"Cylinder","size":{"x":7,"y":12,"z":7},"position":{"x":px,"y":py+21,"z":pz},"material":"Concrete","color":{"r":200,"g":200,"b":195},"anchored":True}})
+    # --- Gallery deck: rusted iron from a wrecked freighter ---
+    cmds.append({"type":"createPart","params":{"name":"LighthouseGallery","shape":"Cylinder","size":{"x":9,"y":1,"z":9},"position":{"x":px,"y":py+28,"z":pz},"material":"Metal","color":{"r":100,"g":60,"b":45},"anchored":True}})
+    # --- Lantern room: salvaged green bottle glass ---
+    cmds.append({"type":"createPart","params":{"name":"LighthouseLanternRoom","shape":"Block","size":{"x":5,"y":5,"z":5},"position":{"x":px,"y":py+31,"z":pz},"material":"Glass","color":{"r":180,"g":210,"b":180},"anchored":True,"transparency":0.4,"reflectance":0.2}})
+    # --- Beacon: brass mechanism, warm light ---
+    cmds.append({"type":"createPart","params":{"name":"LighthouseBeacon","shape":"Ball","size":{"x":2.5,"y":2.5,"z":2.5},"position":{"x":px,"y":py+31,"z":pz},"material":"Metal","color":{"r":180,"g":150,"b":80},"anchored":True}})
+    cmds.append({"type":"addLight","params":{"parent":"LighthouseBeacon","lightType":"SpotLight","brightness":12,"range":250,"color":{"r":255,"g":245,"b":180},"angle":25}})
+    # --- Keeper's cottage: driftwood planks ---
+    cmds.append({"type":"createPart","params":{"name":"KeeperCottage","shape":"Block","size":{"x":9,"y":6,"z":7},"position":{"x":px+9,"y":py+3,"z":pz},"material":"WoodPlanks","color":{"r":130,"g":95,"b":60},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"KeeperRoof","shape":"Wedge","size":{"x":10,"y":3,"z":7},"position":{"x":px+9,"y":py+7.5,"z":pz-2},"material":"Wood","color":{"r":100,"g":70,"b":40},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"KeeperWindow","shape":"Block","size":{"x":0.5,"y":1.5,"z":1.5},"position":{"x":px+13.2,"y":py+3.5,"z":pz},"material":"Neon","color":{"r":255,"g":200,"b":120},"anchored":True}})
+    cmds.append({"type":"addLight","params":{"parent":"KeeperWindow","lightType":"PointLight","brightness":3,"range":15,"color":{"r":255,"g":200,"b":120}}})
+    # --- Boat winch: steel cable drum ---
+    cmds.append({"type":"createPart","params":{"name":"BoatWinch","shape":"Cylinder","size":{"x":2,"y":2,"z":2},"position":{"x":px-6,"y":py+2,"z":pz+5},"material":"Metal","color":{"r":70,"g":68,"b":65},"anchored":True}})
+    # --- Wave-washed rocks and fog at base ---
+    cmds.append({"type":"createPart","params":{"name":"LighthouseRock1","shape":"Ball","size":{"x":4,"y":3,"z":4},"position":{"x":px+5,"y":py+1,"z":pz+5},"material":"Slate","color":{"r":115,"g":110,"b":105},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"LighthouseRock2","shape":"Ball","size":{"x":3,"y":2.5,"z":3},"position":{"x":px-5,"y":py+0.5,"z":pz-4},"material":"Cobblestone","color":{"r":130,"g":125,"b":118},"anchored":True}})
+    cmds.append({"type":"addParticle","params":{"parent":"LighthouseRock1","texture":"rbxassetid://258128463","rate":8,"lifetime":{"min":3,"max":6},"speed":{"min":0.5,"max":1.5},"color":{"r":200,"g":210,"b":220},"size":{"min":2,"max":4},"transparency":0.4,"velocity":{"x":0.5,"y":0,"z":0.5}}})
+    return ("Lighthouse is lit — basalt bones from the cliff, shipwreck stone in the shaft, whitewash the keeper mixed himself, and a brass beacon he pulled off a freighter in '92. The cottage is driftwood, the winch still turns, and the fog's rolling in like always.", cmds)
 
 def b_default(player_name):
     return ("Couldn't match that to anything in the yard. Tell me what you're building — a tower, a house, a bridge. Give me a shape and I'll give you a structure.", [
@@ -902,12 +976,14 @@ def b_default(player_name):
 
 KEYWORDS = {
     'tower': b_tower, 'spire': b_tower, 'pillar': b_tower,
+    'lookout': b_lookout, 'watchtower': b_lookout, 'scout': b_lookout,
     'lighthouse': b_lighthouse, 'beacon': b_lighthouse,
     'house': b_house, 'cabin': b_house, 'cottage': b_house, 'home': b_house, 'shack': b_house,
     'castle': b_castle, 'fortress': b_castle, 'fort': b_castle, 'keep': b_castle, 'citadel': b_castle, 'palace': b_castle,
     'tree': b_tree, 'oak': b_tree, 'pine': b_tree, 'forest': b_tree, 'bush': b_tree,
     'bridge': b_bridge, 'crossing': b_bridge,
-    'wall': b_wall, 'barricade': b_wall, 'fence': b_wall, 'barrier': b_wall,
+    'wall': b_wall, 'barricade': b_wall, 'barrier': b_wall,
+    'fence': b_fence, 'picket': b_fence, 'railing': b_fence,
     'road': b_road, 'path': b_road, 'street': b_road, 'highway': b_road, 'walkway': b_road,
     'lamp': b_lamp, 'lantern': b_lamp, 'streetlight': b_lamp, 'lampost': b_lamp,
     'pyramid': b_pyramid, 'triangle': b_pyramid, 'ziggurat': b_pyramid,
@@ -915,6 +991,7 @@ KEYWORDS = {
     'arch': b_arch, 'gate': b_arch, 'portal': b_arch, 'arc': b_arch,
     'platform': b_platform, 'stage': b_platform, 'deck': b_platform, 'terrace': b_platform,
     'staircase': b_staircase, 'stairs': b_staircase, 'steps': b_staircase, 'ladder': b_staircase,
+    'windmill': b_windmill, 'mill': b_windmill,
     'garden': b_garden, 'park': b_garden, 'yard': b_garden, 'flowerbed': b_garden,
     'dock': b_dock, 'pier': b_dock, 'wharf': b_dock, 'jetty': b_dock,
 }

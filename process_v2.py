@@ -558,7 +558,7 @@ def get_player_context(player_name, session_id, current_message=None):
     # Build a context string for the brain
     parts = []
 
-    bond_level = int(profile.get("bond_level", 0))
+    bond_level = int(profile.get("bond_level") or 0)
     if bond_level > 0:
         parts.append(f"Player bond level: {bond_level} (higher = more trust, more warmth)")
 

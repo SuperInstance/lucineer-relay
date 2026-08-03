@@ -747,6 +747,117 @@ DEEPINFRA_URL = os.environ.get("DEEPINFRA_URL", "https://api.deepinfra.com/v1/op
 DEEPINFRA_KEY = os.environ.get("DEEPINFRA_API_KEY", "")
 VIBE_CODE_MODEL = os.environ.get("VIBE_CODE_MODEL", "Qwen/Qwen3-Coder-480B")
 
+# ─── Safety Stage: Nemotron-Content-Safety-3.5 ──────────────────────────────
+
+SAFETY_MODEL = "nvidia/Nemotron-Content-Safety-3.5"
+SAFETY_SAFE_FALLBACK = "Misread that one. Doesn't belong in the yard."
+
+# Load DeepInfra key from .env if not in environment
+if not DEEPINFRA_KEY:
+    _env_path = Path(__file__).parent.parent / "mcp-deeinfra" / ".env"
+    if not _env_path.exists():
+        _env_path = Path("/home/eileen/mcp-deeinfra/.env")
+    if _env_path.exists():
+        for line in _env_path.read_text().splitlines():
+            if line.startswith("DEEPINFRA_API_KEY="):
+                DEEPINFRA_KEY = line.split("=", 1)[1].strip()
+                break
+
+# CLI flag: --no-safety skips the Nemotron check (for testing)
+SKIP_SAFETY = False
+
+
+def check_content_safety(text: str) -> tuple[bool, str]:
+    """
+    Run Nemotron-Content-Safety-3.5 on the reply text.
+    Returns (is_safe, reason).
+    If the safety API itself fails, we fail SAFE (return False).
+    """
+    if SKIP_SAFETY:
+        return True, "skipped (--no-safety)"
+
+    if not text or not text.strip():
+        return True, "empty text"
+
+    if not DEEPINFRA_KEY:
+        log("Safety: DEEPINFRA_API_KEY not available — FAILING SAFE", "WARN")
+        return False, "safety API unavailable"
+
+    system_prompt = (
+        "You are a content safety classifier for a children's game (ages 10-14). "
+        "Evaluate the following text. If it is safe for children, respond with ONLY 'SAFE'. "
+        "If it is unsafe, respond with ONLY 'UNSAFE: [brief reason]'. "
+        "Categories of unsafe: profanity, violence, sexual content, self-harm, "
+        "drug/alcohol references, hate speech, personal information, bullying."
+    )
+
+    payload = {
+        "model": SAFETY_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": text},
+        ],
+        "temperature": 0.0,
+        "max_tokens": 100,
+    }
+
+    try:
+        body = json.dumps(payload)
+        result = subprocess.run(
+            ['curl', '-s', '--max-time', '30',
+             '-X', 'POST',
+             '-H', f'Authorization: Bearer {DEEPINFRA_KEY}',
+             '-H', 'Content-Type: application/json',
+             '-d', body,
+             DEEPINFRA_URL],
+            capture_output=True, text=True, timeout=35
+        )
+
+        if result.returncode != 0:
+            log(f"Safety: curl failed: {result.stderr[:200]}", "ERROR")
+            return False, "safety API request failed"
+
+        response = json.loads(result.stdout)
+        content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
+        content = content.strip().upper()
+
+        if content.startswith("SAFE"):
+            return True, "safe"
+        elif content.startswith("UNSAFE"):
+            reason = content.split(":", 1)[1].strip() if ":" in content else "unspecified"
+            return False, reason
+        else:
+            # Ambiguous response — fail safe
+            log(f"Safety: ambiguous response: {content[:100]}", "WARN")
+            return False, "ambiguous safety response"
+
+    except subprocess.TimeoutExpired:
+        log("Safety: Nemotron timed out (30s) — FAILING SAFE", "ERROR")
+        return False, "safety API timeout"
+    except Exception as e:
+        log(f"Safety: unexpected error: {e}", "ERROR")
+        return False, f"safety error: {e}"
+
+
+def apply_safety_check(reply: str) -> str:
+    """
+    Run content safety on a reply string.
+    If unsafe, replace with Lucineer's in-voice deflection.
+    Logs the result either way.
+    """
+    is_safe, reason = check_content_safety(reply)
+
+    if is_safe:
+        if reason not in ("safe", "empty text", "skipped (--no-safety)"):
+            log(f"  Safety: passed ({reason})")
+        else:
+            log(f"  Safety: {reason}")
+        return reply
+    else:
+        log(f"  Safety: BLOCKED — {reason}", "WARN")
+        log(f"  Safety: original reply was: {reply[:120]}...", "WARN")
+        return SAFETY_SAFE_FALLBACK
+
 # Era-to-component mapping for vibe-code context
 VIBE_ERA_COMPONENTS = {
     0: ["lever", "pulley", "wheel", "waterwheel", "windmill", "bellows", "gear"],
@@ -1020,6 +1131,9 @@ def _process_vibe_code_job(job, job_id, player_name, message, session_id):
     if not vibe_result:
         vibe_result = _vibe_code_fallback(message, era, target_device)
 
+    # Safety check on the reply
+    vibe_result["reply"] = apply_safety_check(vibe_result.get("reply", ""))
+
     # Log conversation to memory
     if session_id and session_id != "mock-session":
         log_conversation(session_id, player_name, "player", message)
@@ -1120,7 +1234,8 @@ def process_job(job, force_deep=False):
             reply, commands = b_default(player_name)
             used_path = "fallback"
 
-    # ─── 7. Post result to Worker ───
+    # ─── 7. Safety check + post result to Worker ───
+    reply = apply_safety_check(reply)
     success = False
     try:
         result = api_post(f"/api/job/{job_id}/result", {
@@ -1266,11 +1381,16 @@ if __name__ == "__main__":
     parser.add_argument("--loop", action="store_true", help="Continuous polling mode")
     parser.add_argument("--once", action="store_true", help="Single poll (default)")
     parser.add_argument("--deep", action="store_true", help="Force deep brain on all jobs")
+    parser.add_argument("--no-safety", action="store_true", help="Skip Nemotron content safety check")
     parser.add_argument("--mock", type=str, help="Inject a mock job with given message")
     parser.add_argument("--interval", type=int, default=2, help="Poll interval in seconds")
     args = parser.parse_args()
 
     if args.mock:
+        if args.no_safety:
+            global SKIP_SAFETY
+            SKIP_SAFETY = True
+            log("Safety check: SKIPPED (--no-safety)", "WARN")
         mock = {
             "id": f"mock_{int(time.time())}",
             "playerName": "Casey",
@@ -1280,6 +1400,10 @@ if __name__ == "__main__":
         }
         process_job(mock, force_deep=args.deep)
     elif args.loop:
+        if args.no_safety:
+            global SKIP_SAFETY
+            SKIP_SAFETY = True
+            log("Safety check: SKIPPED (--no-safety)", "WARN")
         run_loop(interval=args.interval, force_deep=args.deep)
     else:
         count = run_once(force_deep=args.deep)

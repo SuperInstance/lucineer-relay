@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=eileen
 WorkingDirectory=/home/eileen/projects/lucineer-worker
-Environment=LUCINEER_KEY=AUTH_KEY_PLACEHOLDER
+Environment=LUCINEER_KEY=a3db66d2381c97674f25a8f1b3f8d0a938d889723b121d9625566d074362f734
 # Add DeepInfra key if not already in /home/eileen/mcp-deeinfra/.env:
 # Environment=DEEPINFRA_API_KEY=your_key_here
 ExecStart=/usr/bin/python3 /home/eileen/projects/lucineer-worker/process_v2.py --loop --interval 2

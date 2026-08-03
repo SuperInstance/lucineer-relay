@@ -29,8 +29,7 @@ import sys
 import time
 from datetime import datetime
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+import subprocess
 
 # ─── Defaults ─────────────────────────────────────────────────────────────────
 
@@ -55,37 +54,59 @@ def http_request(
     timeout: int = 30,
 ) -> tuple[int, dict[str, Any]]:
     """
-    Perform an HTTP request using urllib.
+    Perform an HTTP request using curl (Cloudflare blocks Python urllib).
     Returns (status_code, parsed_json_body).
     Raises RuntimeError on network errors or non-JSON responses.
     """
+    cmd = [
+        "curl", "-s", "-w", "\n%{http_code}",
+        "--max-time", str(timeout),
+        "-X", method,
+    ]
+
     hdrs = headers or {}
-    data = None
     if body is not None:
-        data = json.dumps(body).encode("utf-8")
         hdrs.setdefault("Content-Type", "application/json")
+        cmd.extend(["-d", json.dumps(body)])
 
-    req = Request(url, data=data, headers=hdrs, method=method)
+    for key, val in hdrs.items():
+        cmd.extend(["-H", f"{key}: {val}"])
+
+    cmd.append(url)
 
     try:
-        with urlopen(req, timeout=timeout) as resp:
-            status = resp.status
-            raw = resp.read().decode("utf-8")
-    except HTTPError as e:
-        raw = e.read().decode("utf-8", errors="replace")
+        result = subprocess.run(
+            cmd,
+            capture_output=True, text=True,
+            timeout=timeout + 5,  # curl grace period
+        )
+        output = result.stdout.strip()
+        # Last line is the HTTP status code (from -w "%{http_code}")
+        lines = output.rsplit("\n", 1)
+        if len(lines) == 2:
+            raw_body, status_str = lines
+        else:
+            # Empty body or single line
+            raw_body = output
+            status_str = "0"
+
         try:
-            return e.code, json.loads(raw)
-        except json.JSONDecodeError:
-            return e.code, {"_raw": raw}
-    except URLError as e:
-        raise RuntimeError(f"Network error connecting to {url}: {e.reason}") from e
-    except Exception as e:
-        raise RuntimeError(f"Unexpected error connecting to {url}: {e}") from e
+            status = int(status_str.strip())
+        except ValueError:
+            status = 0
 
-    try:
-        return status, json.loads(raw)
-    except json.JSONDecodeError:
-        return status, {"_raw": raw}
+        if status == 0:
+            raise RuntimeError(f"curl returned no valid status. stderr: {result.stderr[:300]}")
+
+        try:
+            return status, json.loads(raw_body)
+        except json.JSONDecodeError:
+            return status, {"_raw": raw_body}
+
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"curl timed out after {timeout}s connecting to {url}")
+    except Exception as e:
+        raise RuntimeError(f"Unexpected error connecting to {url}: {e}")
 
 
 def http_get(url: str, *, headers: dict[str, str] | None = None, timeout: int = 30) -> tuple[int, dict[str, Any]]:
@@ -176,15 +197,25 @@ def phase_health_check(
     all_ok = True
 
     for name, base_url in [("Worker", worker_url), ("Memory", memory_url), ("Vector", vector_url)]:
-        try:
-            status, body = http_get(f"{base_url}/api/health", timeout=10)
-            ok = status == 200 and body.get("status") == "ok"
-            detail = f"HTTP {status}, status={body.get('status', 'N/A')}, service={body.get('service', 'N/A')}"
-            results.record(f"Health: {name} reachable", ok, detail)
-            if not ok:
-                all_ok = False
-        except Exception as e:
-            results.record(f"Health: {name} reachable", False, str(e))
+        # Try /api/health first, then fall back to /health (Memory Worker uses /health)
+        health_paths = ["/api/health", "/health"]
+        ok = False
+        detail = ""
+        for hp in health_paths:
+            try:
+                status, body = http_get(f"{base_url}{hp}", timeout=10)
+                if status == 200 and body.get("status") == "ok":
+                    ok = True
+                    detail = f"{hp} → HTTP {status}, status={body.get('status', 'N/A')}, service={body.get('service', 'N/A')}"
+                    break
+                elif status != 404:
+                    detail = f"{hp} → HTTP {status}, status={body.get('status', 'N/A')}, service={body.get('service', 'N/A')}"
+            except Exception as e:
+                detail = str(e)
+        if not detail:
+            detail = "Tried /api/health and /health — neither returned 200"
+        results.record(f"Health: {name} reachable", ok, detail)
+        if not ok:
             all_ok = False
 
     return all_ok
@@ -686,7 +717,7 @@ Examples:
     if args.skip_memory:
         print("\n── Phase 4: Memory Integration (SKIPPED) ────────────────────")
     else:
-        phase_check_memory(results, memory_url)
+        phase_check_memory(results, memory_url, args.auth_key)
 
     # ── Phase 5: Vector integration ──
     if args.skip_vector:

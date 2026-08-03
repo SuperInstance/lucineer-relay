@@ -78,6 +78,27 @@ def log(msg, level="INFO"):
 
 # ─── Worker API ───────────────────────────────────────────────────────────────
 
+def _check_auth_failure(path, parsed):
+    """
+    Surface auth rejections instead of letting them look like empty results.
+
+    The relay returns {"error": "Unauthorized"} with HTTP 401 when AUTH_KEY is
+    missing or wrong. Callers do `.get("jobs", [])` on the parsed body, which
+    turns that error into an empty list — so a completely unauthenticated
+    processor logs "Heartbeat: OK (0 pending jobs)" forever while doing nothing.
+    That silent failure hid a dead processor for an entire deployment.
+    """
+    if isinstance(parsed, dict) and parsed.get("error") == "Unauthorized":
+        log(
+            f"AUTH FAILURE on {path} — relay rejected X-Lucineer-Key "
+            f"(key is {'EMPTY' if not AUTH_KEY else 'set but not accepted'}). "
+            "Jobs cannot be claimed. Set LUCINEER_KEY to match the relay secret.",
+            "ERROR",
+        )
+        return True
+    return False
+
+
 def api_get(path):
     """GET from Worker using curl (Cloudflare blocks Python urllib)."""
     try:
@@ -87,7 +108,9 @@ def api_get(path):
              f'{WORKER_URL}{path}'],
             capture_output=True, text=True, timeout=15
         )
-        return json.loads(result.stdout)
+        parsed = json.loads(result.stdout)
+        _check_auth_failure(path, parsed)
+        return parsed
     except Exception as e:
         log(f"API GET failed for {path}: {e}", "ERROR")
         return {}

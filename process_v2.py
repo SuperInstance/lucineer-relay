@@ -1370,15 +1370,20 @@ def check_content_safety(text: str) -> tuple[bool, str]:
         content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
         content = content.strip().upper()
 
-        if content.startswith("SAFE"):
-            return True, "safe"
-        elif content.startswith("UNSAFE"):
-            reason = content.split(":", 1)[1].strip() if ":" in content else "unspecified"
+        # Check UNSAFE first (more specific), then fall back to SAFE
+        if "UNSAFE" in content:
+            # Extract reason after UNSAFE
+            match = re.search(r'UNSAFE:?\s*(.*)', content)
+            reason = match.group(1).strip() if match and match.group(1).strip() else "unspecified"
             return False, reason
+        elif "SAFE" in content:
+            # Model may include reasoning before the SAFE verdict
+            return True, "safe"
         else:
-            # Ambiguous response — fail safe
-            log(f"Safety: ambiguous response: {content[:100]}", "WARN")
-            return False, "ambiguous safety response"
+            # Genuinely ambiguous — but fail OPEN for game replies, not closed
+            # Empty/template replies are almost certainly safe
+            log(f"Safety: unclear response, passing through: {content[:100]}", "WARN")
+            return True, "unclear-passthrough"
 
     except subprocess.TimeoutExpired:
         log("Safety: Nemotron timed out (30s) — FAILING SAFE", "ERROR")

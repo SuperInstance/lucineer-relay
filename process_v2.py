@@ -106,10 +106,11 @@ def api_post(path, data):
 # ─── Memory D1 API ────────────────────────────────────────────────────────────
 
 def memory_get(path):
-    """GET from Memory D1 Worker (no auth — to be added)."""
+    """GET from Memory D1 Worker with auth header."""
     try:
         result = subprocess.run(
             ['curl', '-s', '--max-time', '10',
+             '-H', f'X-Lucineer-Key: {AUTH_KEY}',
              f'{MEMORY_URL}{path}'],
             capture_output=True, text=True, timeout=15
         )
@@ -119,12 +120,13 @@ def memory_get(path):
         return {}
 
 def memory_post(path, data):
-    """POST to Memory D1 Worker (no auth — to be added)."""
+    """POST to Memory D1 Worker with auth header."""
     try:
         body = json.dumps(data)
         result = subprocess.run(
             ['curl', '-s', '--max-time', '10',
              '-X', 'POST',
+             '-H', f'X-Lucineer-Key: {AUTH_KEY}',
              '-H', 'Content-Type: application/json',
              '-d', body,
              f'{MEMORY_URL}{path}'],
@@ -138,12 +140,13 @@ def memory_post(path, data):
 # ─── Vectorize API ────────────────────────────────────────────────────────────
 
 def vector_post(path, data):
-    """POST to Vectorize Worker."""
+    """POST to Vectorize Worker with auth header."""
     try:
         body = json.dumps(data)
         result = subprocess.run(
             ['curl', '-s', '--max-time', '15',
              '-X', 'POST',
+             '-H', f'X-Lucineer-Key: {AUTH_KEY}',
              '-H', 'Content-Type: application/json',
              '-d', body,
              f'{VECTOR_URL}{path}'],
@@ -1387,8 +1390,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.no_safety:
-        global SKIP_SAFETY  # noqa: PLW0603
-        SKIP_SAFETY = True
+        import __main__
+        __main__.SKIP_SAFETY = True
         log("Safety check: SKIPPED (--no-safety)", "WARN")
 
     if args.mock:

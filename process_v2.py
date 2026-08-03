@@ -1386,12 +1386,12 @@ if __name__ == "__main__":
     parser.add_argument("--interval", type=int, default=2, help="Poll interval in seconds")
     args = parser.parse_args()
 
+    if args.no_safety:
+        global SKIP_SAFETY  # noqa: PLW0603
+        SKIP_SAFETY = True
+        log("Safety check: SKIPPED (--no-safety)", "WARN")
+
     if args.mock:
-        if args.no_safety:
-            global SKIP_SAFETY
-            SKIP_SAFETY = True
-            log("Safety check: SKIPPED (--no-safety)", "WARN")
-        mock = {
             "id": f"mock_{int(time.time())}",
             "playerName": "Casey",
             "message": args.mock,
@@ -1400,10 +1400,6 @@ if __name__ == "__main__":
         }
         process_job(mock, force_deep=args.deep)
     elif args.loop:
-        if args.no_safety:
-            global SKIP_SAFETY
-            SKIP_SAFETY = True
-            log("Safety check: SKIPPED (--no-safety)", "WARN")
         run_loop(interval=args.interval, force_deep=args.deep)
     else:
         count = run_once(force_deep=args.deep)

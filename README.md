@@ -1,58 +1,397 @@
-# Lucineer Relay
+# lucineer-worker
 
-*The bridge between a chat box in Roblox and five AI models thinking simultaneously about what to build.*
+**Cloudflare Durable Object relay and job queue for the Slackwater build pipeline.**
 
----
-
-A player types "build me a castle on the hill." Those six words travel from a Roblox client through an HTTPS request to a Cloudflare Worker running on the edge, which stores them in a Durable Object backed by SQLite, which hands them to a Python processor running as a systemd daemon, which checks a Vectorize index for relevant skills, fetches the player's conversation history from a D1 database, and routes the request through a pipeline of five language models — Seed-2.0-mini to parse intent, Qwen3.6 to plan the spatial layout, Qwen3-Coder-480B to generate build commands, and Hermes-405B to wrap it all in the voice of a gruff master builder who's been constructing things since before this engine existed.
-
-Twelve seconds later, twenty-eight JSON commands travel back. A castle appears in the world, stone by stone, each part fading in with a sound and a particle burst. Lucineer says: *"Castle's up — walls, corner towers, keep, the works. Gate's in but I left the portcullis mechanism for you. Even a foreman needs something to do."*
-
-This repo is the plumbing that makes that possible.
+The Worker is the single ingress point between the Roblox client and the Python processor. It maintains a SQLite-backed Durable Object for job state, exposes public endpoints for player-facing traffic, authenticates internal endpoints for the processor, and writes MOLT trajectory data to R2.
 
 ---
 
-## What lives here
+## Architecture
 
-**The Worker** (`src/`) — a Cloudflare Worker with a Durable Object that manages a SQLite-backed job queue. It accepts messages from Roblox players, stores them as jobs, lets the processor claim and complete them, and manages world state per session. Job claiming prevents duplicate work. Stale job cleanup recovers from crashed processors. Rate limiting keeps a single session from flooding the pipeline.
-
-**The Processor** (`process_v2.py`) — a Python daemon that polls the Worker for pending jobs every two seconds. For each job, it tries the fast path first: keyword matching against 17 build templates that produce results in under a second. If no template matches, it falls back to `brain.py` — the 5-model deep pipeline that can take 30-180 seconds for novel builds. Either way, the result goes back to the Worker, which stores it for the Roblox client to pick up.
-
-**The Brain** integration — the processor calls `brain.py` at `../lucineer-brain/brain.py`, which routes through DeepInfra models. The brain returns JSON with a reply (in Lucineer's voice) and build commands (matching the CommandExecutor schema).
-
-**Memory integration** — every job logs to the D1 memory worker. Player profiles are upserted. Build history is recorded with positions and command counts. Conversations are stored — both the player's message and Lucineer's reply — so the next time the player returns, Lucineer can reference what they built last time. *"Your bridge held through the last blow. I checked."*
-
-**Skill search** — before falling back to the deep brain, the processor queries the Vectorize index for semantically similar skills. "Build me a tower" finds the Scrap Tower skill at 0.68 confidence. This doesn't replace the brain — it gives the brain context about what the system already knows how to build.
-
----
-
-## The live endpoints
-
-The Worker is deployed at `https://lucineer-relay.casey-digennaro.workers.dev`:
-
-- `POST /api/message` — player sends a chat message (no auth required)
-- `GET /api/job/:id` — poll a job's status
-- `POST /api/job/:id/result` — processor posts the result (auth required)
-- `GET /api/jobs/pending` — processor claims pending jobs (auth required)
-- `POST /api/state` — update world state (auth required)
-- `GET /api/state/:session` — fetch world state
-- `GET /api/health` — health check (no auth)
-
----
-
-## The daemon
-
-The processor runs as a systemd user service:
-
-```bash
-systemctl --user start lucineer-processor   # start
-systemctl --user status lucineer-processor  # check
-systemctl --user stop lucineer-processor    # stop
-tail -50 processor-daemon.log               # logs
+```
+Roblox Client ──POST /api/message──▶  Worker  ──▶  LucineerSession DO (SQLite)
+       ▲                                    │            │
+       │                                    │            ├── createJob()
+       └──GET /api/job/:id──────────────────┤            ├── claimJob()
+                                            │            ├── setJobResult()
+       Python Processor                     │            ├── getPendingJobs()
+            │                               │            └── cleanupStaleJobs()
+            ├──GET /api/jobs/pending────────┤
+            ├──POST /api/job/:id/claim──────┤
+            ├──POST /api/job/:id/result─────┤
+            ├──POST /api/state──────────────┤
+            └──POST /api/trajectory─────────┼──▶  R2 Bucket (lucineer-trajectories)
 ```
 
-It restarts on crash. It logs heartbeats every 60 seconds. It circuit-breaks after 5 consecutive failures. It's been running since 9:30 this morning.
+### Bindings
+
+| Binding | Type | Purpose |
+|---------|------|---------|
+| `LUCINEER_SESSION` | Durable Object | SQLite-backed job queue and world state |
+| `LUCINEER_TRAJECTORIES` | R2 Bucket | Append-only MOLT trajectory logs |
+| `LUCINEER_INTERNAL_KEY` | Secret | Processor authentication |
+| `LUCINEER_KEY` | Secret (legacy) | Backward-compatible auth key |
+| `LUCINEER_SHARED_SECRET` | Secret | Inter-service auth (memory/vector calling relay) |
+
+### Wrangler Configuration
+
+```jsonc
+{
+  "name": "lucineer-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{ "name": "LUCINEER_SESSION", "class_name": "LucineerSession" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["LucineerSession"] }],
+  "r2_buckets": [{ "binding": "LUCINEER_TRAJECTORIES", "bucket_name": "lucineer-trajectories" }]
+}
+```
 
 ---
 
-*The bridge doesn't care what crosses it. It just holds.*
+## Durable Object: LucineerSession
+
+The `LucineerSession` DO uses Cloudflare's SQLite storage (not KV-style key-value) for structured queries. All job state, world state, and message history live in SQLite tables inside the DO.
+
+### Schema
+
+```sql
+CREATE TABLE jobs (
+  id          TEXT PRIMARY KEY,       -- 32-char hex from crypto.getRandomValues
+  session_id  TEXT NOT NULL,
+  player_name TEXT NOT NULL,
+  message     TEXT NOT NULL,
+  status      TEXT NOT NULL DEFAULT 'pending',  -- pending|processing|complete|error
+  reply       TEXT,
+  commands    TEXT,                   -- JSON-serialized BuildCommand[]
+  files       TEXT,                   -- JSON-serialized RemoteFile[]
+  error       TEXT,
+  created_at  INTEGER NOT NULL,       -- ms epoch
+  completed_at INTEGER,
+  claimed_at  INTEGER,                -- ms epoch when processor claimed
+  attempts    INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE world_state (
+  session_id  TEXT PRIMARY KEY,
+  snapshot    TEXT NOT NULL,          -- JSON
+  updated_at  INTEGER NOT NULL
+);
+
+CREATE TABLE message_history (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  job_id      TEXT NOT NULL,
+  session_id  TEXT NOT NULL,
+  player_name TEXT NOT NULL,
+  message     TEXT NOT NULL,
+  reply       TEXT,
+  timestamp   INTEGER NOT NULL
+);
+
+-- Indexes
+CREATE INDEX idx_jobs_session  ON jobs(session_id);
+CREATE INDEX idx_jobs_status   ON jobs(status);
+CREATE INDEX idx_jobs_claimed  ON jobs(claimed_at);
+CREATE INDEX idx_history_session ON message_history(session_id);
+```
+
+### Schema Migration
+
+The DO constructor runs `ALTER TABLE ADD COLUMN` wrapped in try/catch for idempotency. Columns `claimed_at` and `attempts` are added to pre-existing tables without data loss. Legacy `processing` status rows are migrated to `pending` so the claiming flow picks them up.
+
+---
+
+## Job Lifecycle
+
+```
+                    ┌──────────────────────────┐
+                    │       pending             │
+                    │  (created by /message)    │
+                    └─────────┬────────────────┘
+                              │
+                    POST /api/job/:id/claim
+                              │ (atomic CAS)
+                    ┌─────────▼────────────────┐
+                    │      processing           │
+                    │  (processor owns lease)   │
+                    └─────────┬────────────────┘
+                              │
+              ┌───────────────┼───────────────┐
+              │               │               │
+    POST /api/job/:id/result  │   5 min lease │
+              │               │   expiry      │
+    ┌─────────▼──────┐   ┌───▼───────────┐   │
+    │    complete    │   │    error      │   │
+    └────────────────┘   └───────────────┘   │
+                                            │
+                               cleanupStaleJobs()
+                                    │
+                              back to pending
+                              (attempts < 3)
+                              else → error
+```
+
+### States
+
+| Status | Meaning | Transition trigger |
+|--------|---------|-------------------|
+| `pending` | Job created, awaiting processor | `POST /api/message` or stale lease cleanup |
+| `processing` | Processor has claimed the job | `POST /api/job/:id/claim` (atomic) |
+| `complete` | Processor posted result | `POST /api/job/:id/result` |
+| `error` | Failed after MAX_ATTEMPTS (3) | Exceeded retries or explicit error |
+
+### Claim Semantics
+
+Claiming is an atomic compare-and-set: the DO updates `status = 'processing'` and `claimed_at = now` only if `status = 'pending'`. If another processor already claimed it, the CAS fails and returns 409 Conflict.
+
+### Stale Job Recovery
+
+A 5-minute lease (`CLAIM_LEASE_MS = 300000`) prevents indefinite locking. The `cleanupStaleJobs()` RPC scans for `processing` jobs whose `claimed_at` is older than the lease, resets them to `pending`, and increments `attempts`. Jobs exceeding `MAX_ATTEMPTS = 3` are permanently errored.
+
+---
+
+## Authentication Model
+
+### Three-Tier Auth
+
+| Tier | Header | Endpoints | Purpose |
+|------|--------|-----------|---------|
+| **Public** | None | `POST /api/message`, `GET /api/job/:id` | Roblox client; jobId is a capability token |
+| **Internal** | `X-Lucineer-Key` | All `/api/job/*`, `/api/jobs/*`, `/api/state/*`, `/api/diag` | Python processor |
+| **Trajectory** | `X-Lucineer-Key` | `POST /api/trajectory` | Processor writing MOLT data to R2 |
+
+The auth function accepts `LUCINEER_INTERNAL_KEY`, legacy `LUCINEER_KEY`, or `LUCINEER_SHARED_SECRET` (for inter-service calls from memory/vector Workers).
+
+### Rate Limiting
+
+Public message ingestion is rate-limited per session: **10 messages per minute** (`RATE_LIMIT_MAX = 10`, `RATE_LIMIT_WINDOW_MS = 60000`). The counter queries the `jobs` table for recent `created_at` timestamps within the sliding window.
+
+---
+
+## API Reference
+
+### Public Endpoints
+
+#### `POST /api/message`
+
+Create a new build job from a player chat message.
+
+**Request:**
+```json
+{
+  "sessionId": "string",
+  "playerName": "string",
+  "message": "string",
+  "playerState": { "position": { "x": 0, "y": 0, "z": 0 } },
+  "worldSnapshot": { "objects": [] }
+}
+```
+
+**Response (200):**
+```json
+{ "jobId": "a1b2c3d4...", "status": "processing" }
+```
+
+**Errors:** 400 (missing fields), 429 (rate limited)
+
+---
+
+#### `GET /api/job/:jobId`
+
+Poll job status. No auth required — the jobId serves as a capability token.
+
+**Response (200):**
+```json
+{
+  "id": "a1b2c3d4...",
+  "sessionId": "string",
+  "playerName": "string",
+  "message": "build a castle",
+  "status": "complete",
+  "reply": "Castle's up. Four tower walls...",
+  "commands": [ { "type": "createPart", "params": { "name": "CastleFloor", "size": {"x":40,"y":1,"z":40} } } ],
+  "createdAt": 1722640000000,
+  "completedAt": 1722640030000
+}
+```
+
+---
+
+#### `GET /api/health`
+
+Unauthenticated health check.
+
+```json
+{ "status": "ok", "timestamp": 1722640000000 }
+```
+
+---
+
+### Internal Endpoints (require `X-Lucineer-Key`)
+
+#### `GET /api/jobs/pending`
+
+Returns all jobs with `status = 'pending'`.
+
+**Response:**
+```json
+{
+  "jobs": [ { "id": "...", "sessionId": "...", "message": "...", "createdAt": 0 } ],
+  "notice": "Call POST /api/job/:jobId/claim before processing..."
+}
+```
+
+#### `POST /api/job/:jobId/claim`
+
+Atomically claim a job for processing. Returns 409 if already claimed.
+
+**Response (200):** `{ "ok": true, "job": { ...full job object } }`
+**Response (409):** `{ "ok": false, "error": "Job already claimed or not found" }`
+
+#### `POST /api/job/:jobId/result`
+
+Post the processor's build result.
+
+**Request:**
+```json
+{
+  "reply": "Castle's up — four tower walls...",
+  "commands": [ { "type": "createPart", "params": { "name": "...", "position": {"x":0,"y":0,"z":0}, "size": {"x":0,"y":0,"z":0}, "material": "Brick", "color": {"r":150,"g":130,"b":100}, "anchored": true } } ],
+  "files": [ { "name": "concept_art.png", "url": "https://...", "description": "Reference image" } ]
+}
+```
+
+**Response (200):**
+```json
+{
+  "ok": true,
+  "jobId": "a1b2c3d4...",
+  "filtered": false,
+  "filterNotice": "TextService:FilterStringAsync() must be called on `reply` before display."
+}
+```
+
+#### `POST /api/state`
+
+Update world state snapshot for a session.
+
+#### `GET /api/state/:sessionId`
+
+Retrieve the current world state for a session.
+
+#### `POST /api/trajectory`
+
+Write MOLT trajectory events to R2. Each call creates a separate JSONL object keyed by `trajectories/{sessionId}/{timestamp}.json`. Append-only: partial failures never corrupt earlier data.
+
+**Request:**
+```json
+{
+  "sessionId": "string",
+  "events": [
+    {
+      "type": "pipeline_stage",
+      "timestamp": 1722640000000,
+      "jobId": "a1b2c3d4...",
+      "stage": "intent",
+      "model": "ByteDance/Seed-2.0-mini",
+      "channel": 10,
+      "data": { "intent": "build", "subject": "castle" },
+      "errorMask": 0
+    }
+  ]
+}
+```
+
+**R2 Object Key:** `trajectories/{sessionId}/{epochMs}.json`
+
+R2 write failure returns 500 so the processor can retry. Trajectories are the highest-option-value data in the system.
+
+#### `GET /api/diag`
+
+Diagnostic endpoint returning schema info and job counts.
+
+---
+
+## Processor (`process_v2.py`)
+
+The Python processor is the poll-based consumer of this Worker. It runs as a daemon with:
+
+- **2-second poll interval** against `GET /api/jobs/pending`
+- **Atomic claiming** via `POST /api/job/:id/claim` before processing
+- **Memory integration** via `lucineer-memory` Worker (player profiles, build history, conversations)
+- **Skill lookup** via `lucineer-vector` Worker (Vectorize semantic search)
+- **Two-speed brain**: fast template match → deep `brain.py` pipeline fallback
+- **Circuit breaker**: 5 consecutive failures triggers CRITICAL log, does not crash
+- **Memory leak guard**: RSS check at each 60s heartbeat, warns at 200MB
+
+### Daemon Flags
+
+```bash
+python3 process_v2.py --loop          # continuous mode (2s poll)
+python3 process_v2.py --once          # single poll
+python3 process_v2.py --deep          # force deep brain on all jobs
+python3 process_v2.py --mock "castle" # inject test job
+python3 process_v2.py --no-safety     # skip Nemotron content safety check
+python3 process_v2.py --interval 5    # custom poll interval
+```
+
+### Content Safety Pipeline
+
+All replies pass through `nvidia/Nemotron-Content-Safety-3.5` before posting back to the Worker. If the safety model returns UNSAFE, the reply is replaced with Lucineer's in-voice deflection: *"Misread that one. Doesn't belong in the yard."* The safety check fails safe — if the API is unavailable, the reply is blocked.
+
+---
+
+## Deployment
+
+```bash
+# Deploy the Worker
+npx wrangler deploy
+
+# Set secrets
+npx wrangler secret put LUCINEER_INTERNAL_KEY
+npx wrangler secret put LUCINEER_SHARED_SECRET
+
+# Run the processor
+python3 process_v2.py --loop
+```
+
+**Production URL:** `https://lucineer-relay.casey-digennaro.workers.dev`
+
+---
+
+## File Layout
+
+```
+src/
+├── index.ts              # Worker entry point, router, auth middleware
+├── types.ts              # Shared TypeScript interfaces (Env, Job, TrajectoryEvent, ...)
+└── do/
+    └── LucineerSession.ts  # Durable Object: SQLite schema, job lifecycle, rate limiting
+process_v2.py             # Hybrid-intelligence processor daemon (memory + vector + brain)
+process.py                # Legacy processor (pre-memory, pre-vector)
+bond.py                   # Player bond level tracking
+build_templates_v2.py     # Fast-path template library (castle, house, tower, dock, ...)
+test_e2e.py               # End-to-end integration test
+wrangler.jsonc            # Cloudflare Workers configuration
+```
+
+---
+
+## Related Repositories
+
+| Repository | Role |
+|-----------|------|
+| [lucineer-brain](../lucineer-brain) | 4-stage multi-model pipeline (Seed → Planner → Coder → Hermes) |
+| [lucineer-memory](../lucineer-memory) | D1-backed player profiles, build history, conversations |
+| [lucineer-vector](../lucineer-vector) | Vectorize semantic skill library (bge-small-en, 384-dim) |
+| [lucineer-roblox](../lucineer-roblox) | Roblox client: 16 Lua modules, CommandExecutor, BeatClock |
+| [lucineer-system](../lucineer-system) | Design docs, roundtable analyses, architecture specs |
+| [casting-call](../casting-call) | Model routing atlas and CastingDirector (Layer 8) |
+
+---
+
+## License
+
+MIT

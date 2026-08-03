@@ -47,6 +47,8 @@ DEFAULT_AUTH_KEY = os.environ.get("LUCINEER_KEY", "AUTH_KEY_PLACEHOLDER")
 JOURNAL_DIR = "/home/eileen/projects/playtest-journals"
 POLL_INTERVAL = 2.0
 POLL_TIMEOUT = 120.0
+ADAPTIVE_TIMEOUT_MIN = 15.0  # After repeated failures, shorten timeout
+CONSECUTIVE_FAILURES_FOR_ADAPTIVE = 2  # Start adapting after N consecutive timeouts
 
 # Character-voice markers — used to detect if Lucineer stays in character
 VOICE_MARKERS = [
@@ -135,10 +137,22 @@ def send_message(
     return body.get("jobId"), elapsed
 
 
-def poll_job(job_id: str, auth_key: str, timeout: float | None = None) -> tuple[dict[str, Any] | None, float]:
-    """Poll until the job completes. Returns (job_dict, poll_elapsed)."""
+def poll_job(
+    job_id: str,
+    auth_key: str,
+    timeout: float | None = None,
+) -> tuple[dict[str, Any] | None, float, str | None]:
+    """Poll until the job completes.
+
+    Returns (job_dict_or_None, poll_elapsed_seconds, stale_status_or_None).
+    If the job is stuck in 'claimed' with an expired lease, returns early
+    with stale_status set so the caller can report it rather than waiting
+    the full timeout.
+    """
     deadline = time.monotonic() + (timeout or POLL_TIMEOUT)
     start = time.monotonic()
+    last_status: str | None = None
+    stale_check_done = False
 
     while time.monotonic() < deadline:
         status, body = curl_request(
@@ -147,16 +161,39 @@ def poll_job(job_id: str, auth_key: str, timeout: float | None = None) -> tuple[
             headers={"X-Lucineer-Key": auth_key},
         )
         if status == 404:
-            return None, time.monotonic() - start
+            return None, time.monotonic() - start, None
         if status == 200:
             job_status = body.get("status", "unknown")
-            if job_status in ("done", "complete", "completed"):
-                return body, time.monotonic() - start
+            last_status = job_status
+
+            if job_status == "complete":
+                return body, time.monotonic() - start, None
             if job_status == "error":
-                return body, time.monotonic() - start
+                return body, time.monotonic() - start, None
+
+            # Detect stale claimed jobs (lease expired but never completed)
+            if job_status == "claimed" and not stale_check_done:
+                lease_expires = body.get("leaseExpiresAt")
+                claimed_at = body.get("claimedAt")
+                now_ms = int(time.time() * 1000)
+
+                if lease_expires and lease_expires < now_ms:
+                    # Lease has expired — job is stale
+                    elapsed = time.monotonic() - start
+                    return body, elapsed, f"stale_claimed (lease expired {((now_ms - lease_expires) / 1000):.0f}s ago, attempts={body.get('attempts', '?')})"
+
+                # Wait until just past lease expiry, then re-check once
+                if lease_expires:
+                    wait_until = (lease_expires - now_ms) / 1000 + POLL_INTERVAL
+                    if wait_until > 0 and wait_until < (deadline - time.monotonic()):
+                        time.sleep(min(wait_until, 30))  # Don't wait more than 30s extra
+                        stale_check_done = True
+                        continue
+
         time.sleep(POLL_INTERVAL)
 
-    return None, time.monotonic() - start
+    # Timed out — include the last known status if available
+    return None, time.monotonic() - start, f"timeout (last_status={last_status})"
 
 
 # ─── Journaling ──────────────────────────────────────────────────────────────
@@ -310,6 +347,7 @@ class Journal:
         print(f"    JSONL: {self.jsonl_path}")
         print(f"    MD:    {self.md_path}")
         print(f"{'═' * 60}")
+        sys.stdout.flush()
 
 
 # ─── Analysis Helpers ────────────────────────────────────────────────────────
@@ -757,6 +795,7 @@ class PlaytestRunner:
         self.auth_key = auth_key
         self.session_id = session_id or f"playtest-{persona.name.lower()}-{int(time.time())}"
         self.journal = Journal(persona.name, self.session_id)
+        self._consecutive_failures = 0  # For adaptive timeout
 
     def run_interaction(self, message: str) -> dict[str, Any]:
         """Send a single message and journal the result."""
@@ -795,11 +834,20 @@ class PlaytestRunner:
 
         print(f"  ⏳ Job {job_id} created, polling...")
 
-        job, poll_time = poll_job(job_id, self.auth_key)
+        # Adaptive timeout: shorten polling after repeated failures
+        current_timeout = POLL_TIMEOUT
+        if self._consecutive_failures >= CONSECUTIVE_FAILURES_FOR_ADAPTIVE:
+            current_timeout = max(ADAPTIVE_TIMEOUT_MIN, POLL_TIMEOUT / (2 ** (self._consecutive_failures - 1)))
+            print(f"  ⚡ Adaptive timeout: {current_timeout:.0f}s ({self._consecutive_failures} consecutive failures)")
+
+        job, poll_time, stale_info = poll_job(job_id, self.auth_key, timeout=current_timeout)
 
         if not job:
-            error = f"Job timed out after {POLL_TIMEOUT}s"
-            print(f"  ❌ {error}")
+            self._consecutive_failures += 1
+            error_msg = f"Job timed out after {current_timeout:.0f}s"
+            if stale_info:
+                error_msg = f"Job abandoned: {stale_info}"
+            print(f"  ❌ {error_msg}")
             entry = self.journal.add_entry(
                 message_sent=message,
                 response_received="",
@@ -807,14 +855,38 @@ class PlaytestRunner:
                 round_trip_seconds=send_time + poll_time,
                 train_of_thought=generate_train_of_thought(
                     self.persona.name, message, "", [], send_time + poll_time,
-                    self.journal.entries, error=error,
+                    self.journal.entries, error=error_msg,
                 ),
-                emotional_reaction=get_emotional_reaction(self.persona.name, 2, error, 0),
+                emotional_reaction=get_emotional_reaction(self.persona.name, 2, error_msg, 0),
                 quality_score=1,
-                notes="Job timed out",
-                error=error,
+                notes=error_msg,
+                error=error_msg,
             )
             return entry
+
+        # Check for error status from the game
+        if job.get("status") == "error":
+            self._consecutive_failures += 1
+            error_msg = f"Job error: {job.get('error', 'unknown error')}"
+            print(f"  ❌ {error_msg}")
+            entry = self.journal.add_entry(
+                message_sent=message,
+                response_received="",
+                build_commands=[],
+                round_trip_seconds=send_time + poll_time,
+                train_of_thought=generate_train_of_thought(
+                    self.persona.name, message, "", [], send_time + poll_time,
+                    self.journal.entries, error=error_msg,
+                ),
+                emotional_reaction=get_emotional_reaction(self.persona.name, 2, error_msg, 0),
+                quality_score=1,
+                notes=error_msg,
+                error=error_msg,
+            )
+            return entry
+
+        # Success — reset failure counter
+        self._consecutive_failures = 0
 
         reply = job.get("reply", "")
         commands = job.get("commands", [])
@@ -1022,6 +1094,7 @@ Scenarios:
     print(f"  Auth:      {'✅ set' if auth_key != 'AUTH_KEY_PLACEHOLDER' else '⚠️  placeholder'}")
     print(f"  Journal:   {JOURNAL_DIR}")
     print(f"  Time:      {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    sys.stdout.flush()
 
     overall_start = time.monotonic()
 

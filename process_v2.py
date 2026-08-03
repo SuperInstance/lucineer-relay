@@ -29,7 +29,7 @@ Usage:
   python3 process_v2.py --mock "castle" # inject a test job
   python3 process_v2.py --deep          # force deep brain on all jobs
 """
-import json, sys, os, time, subprocess, random, signal, traceback, resource
+import json, sys, os, time, subprocess, random, signal, traceback, resource, threading
 from datetime import datetime
 from pathlib import Path
 
@@ -44,6 +44,7 @@ VECTOR_URL = os.environ.get("LUCINEER_VECTOR_URL",
 # Set via: export LUCINEER_KEY="your-secret-key"
 # The same key must be configured on the Worker side.
 AUTH_KEY = os.environ.get("LUCINEER_KEY", "")
+WORKER_ID = os.environ.get("LUCINEER_WORKER_ID", "processor-1")
 if not AUTH_KEY:
     # Warn but don't crash — the Worker currently doesn't require auth for /api/message
     # When auth is re-enabled, this becomes a hard requirement.
@@ -132,6 +133,40 @@ def api_post(path, data):
     except Exception as e:
         log(f"API POST failed for {path}: {e}", "ERROR")
         return {}
+
+
+def renew_lease(job_id, worker_id):
+    """Extend the lease on a long-running job so it isn't reclaimed."""
+    try:
+        result = api_post(f"/api/job/{job_id}/renew", {"workerId": worker_id})
+        if result.get("ok"):
+            log(f"  Lease renewed for {job_id[:8]}", "DEBUG")
+        else:
+            log(f"  Lease renewal note for {job_id[:8]}: {result.get('error', 'unknown')}", "DEBUG")
+    except Exception as e:
+        log(f"  Lease renewal failed for {job_id[:8]}: {e}", "WARN")
+
+
+class LeaseRenewal:
+    """Background lease renewal for a single job."""
+    def __init__(self, job_id, worker_id, interval=60):
+        self.job_id = job_id
+        self.worker_id = worker_id
+        self.interval = interval
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def _loop(self):
+        while not self._stop.wait(self.interval):
+            renew_lease(self.job_id, self.worker_id)
+
+    def stop(self):
+        self._stop.set()
+        self._thread.join(timeout=1)
+
 
 # ─── Memory D1 API ────────────────────────────────────────────────────────────
 
@@ -1674,7 +1709,7 @@ def _process_vibe_code_job(job, job_id, player_name, message, session_id):
         return False
 
 
-def process_job(job, force_deep=False):
+def process_job(job, force_deep=False, worker_id=WORKER_ID):
     job_id = job.get('id', '')
     player_name = job.get('playerName', 'friend')
     message = job.get('message', '')
@@ -1745,21 +1780,26 @@ def process_job(job, force_deep=False):
     if not reply:
         used_path = "deep-brain"
         log(f"  → Deep brain pipeline...")
-        brain_result = call_brain(
-            player_message=message,
-            world_context=world_ctx,
-            memory_context=memory_ctx,
-            skill_context=skill_ctx,
-        )
-        if brain_result:
-            reply = brain_result.get("reply", "")
-            commands = brain_result.get("commands", [])
-            pipeline = brain_result.get("_pipeline", {})
-            log(f"  → Brain done: {len(commands)} commands in {pipeline.get('total_time_s', '?')}s")
-        else:
-            # Ultimate fallback
-            reply, commands = b_default(player_name)
-            used_path = "fallback"
+        renewal = LeaseRenewal(job_id, worker_id)
+        renewal.start()
+        try:
+            brain_result = call_brain(
+                player_message=message,
+                world_context=world_ctx,
+                memory_context=memory_ctx,
+                skill_context=skill_ctx,
+            )
+            if brain_result:
+                reply = brain_result.get("reply", "")
+                commands = brain_result.get("commands", [])
+                pipeline = brain_result.get("_pipeline", {})
+                log(f"  → Brain done: {len(commands)} commands in {pipeline.get('total_time_s', '?')}s")
+            else:
+                # Ultimate fallback
+                reply, commands = b_default(player_name)
+                used_path = "fallback"
+        finally:
+            renewal.stop()
 
     # ─── 7. Safety check + post result to Worker ───
     reply = apply_safety_check(reply)
@@ -1820,7 +1860,7 @@ def save_to_memory(job_id, session_id, player_name, message, reply, commands,
 # ─── Main Loops ───────────────────────────────────────────────────────────────
 
 def run_once(force_deep=False):
-    data = api_post("/api/jobs/claim", {"workerId": "processor-1", "limit": 5})
+    data = api_post("/api/jobs/claim", {"workerId": WORKER_ID, "limit": 5})
     jobs = data.get("jobs", [])
     if not jobs:
         return 0
@@ -1829,7 +1869,7 @@ def run_once(force_deep=False):
     count = 0
     for job in jobs:
         try:
-            if process_job(job, force_deep=force_deep):
+            if process_job(job, force_deep=force_deep, worker_id=WORKER_ID):
                 count += 1
         except Exception as e:
             log(f"Job {job.get('id','?')[:8]} crashed: {e}", "ERROR")

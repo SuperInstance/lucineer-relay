@@ -1,7 +1,6 @@
 #!/bin/bash
-# Lucineer Job Processor — runs continuously, polling every 3 seconds
+# Lucineer Job Processor v2 — runs continuously, polling every 2 seconds.
+# This wrapper is kept for backward compatibility; the production path uses
+# systemd (lucineer-processor.service) instead.
 cd /home/eileen/projects/lucineer-worker
-while true; do
-    ./process-jobs.sh --once >> processor.log 2>&1
-    sleep 3
-done
+exec python3 process_v2.py --loop --interval 2 >> processor.log 2>&1

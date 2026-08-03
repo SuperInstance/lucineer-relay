@@ -69,6 +69,12 @@ export class LucineerSession extends DurableObject<Env> {
       CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
       CREATE INDEX IF NOT EXISTS idx_jobs_claimed ON jobs(claimed_at);
       CREATE INDEX IF NOT EXISTS idx_history_session ON message_history(session_id);
+
+      CREATE TABLE IF NOT EXISTS active_sessions (
+        session_id TEXT PRIMARY KEY,
+        last_seen INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_active_sessions_seen ON active_sessions(last_seen);
     `);
 
     // Migrate existing tables: add columns if missing
@@ -118,6 +124,57 @@ export class LucineerSession extends DurableObject<Env> {
     } catch (e) {
       return { error: String(e), status: "fail" };
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Session registry (stored in the "default" DO so batch claim can fan out)
+  // ---------------------------------------------------------------------------
+
+  async registerSession(sessionId: string): Promise<void> {
+    const now = Date.now();
+    this.ctx.storage.sql.exec(
+      `INSERT INTO active_sessions (session_id, last_seen)
+       VALUES (?, ?)
+       ON CONFLICT(session_id) DO UPDATE SET last_seen = excluded.last_seen`,
+      sessionId,
+      now,
+    );
+  }
+
+  async getActiveSessions(): Promise<string[]> {
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000; // 7 days
+    this.ctx.storage.sql.exec(
+      `DELETE FROM active_sessions WHERE last_seen < ?`,
+      cutoff,
+    );
+    const cursor = this.ctx.storage.sql.exec(
+      `SELECT session_id FROM active_sessions ORDER BY last_seen DESC`,
+    );
+    return cursor.toArray().map((r: SqlRow) => String(r["session_id"]));
+  }
+
+  /**
+   * Extend the lease on a claimed job so long-running processors don't lose it.
+   * Only updates jobs that are still status='claimed'. If workerId is provided,
+   * only renews leases owned by that worker.
+   */
+  async renewLease(jobId: string, workerId?: string): Promise<Job | null> {
+    const now = Date.now();
+    const leaseExpiresAt = now + LEASE_MS;
+
+    this.ctx.storage.sql.exec(
+      `UPDATE jobs
+       SET lease_expires_at = ?
+       WHERE id = ?
+         AND status = 'claimed'
+         AND (? IS NULL OR claimed_by = ?)`,
+      leaseExpiresAt,
+      jobId,
+      workerId ?? null,
+      workerId ?? null,
+    );
+
+    return this.getJob(jobId);
   }
 
   /**

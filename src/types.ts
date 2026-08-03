@@ -2,7 +2,10 @@
 // Phase 1 Day 1-3: shared-secret auth, job claiming, R2 trajectory writer
 
 export interface Env {
-  LUCINEER_SESSION: DurableObjectNamespace;
+  /** Durable Object namespace for session-scoped job/state storage.
+   *  Typed to LucineerSession so RPC calls are checked at compile time.
+   */
+  LUCINEER_SESSION: DurableObjectNamespace<import("./do/LucineerSession").LucineerSession>;
   /** Processor-facing key for /api/jobs/pending, /api/job/:id/result, /api/state, etc. */
   LUCINEER_INTERNAL_KEY: string;
   /** Legacy key — still accepted on internal endpoints during transition. */
@@ -140,4 +143,12 @@ export interface LucineerSessionRPC {
   getMessageHistory(sessionId: string, limit?: number): Promise<MessageHistoryEntry[]>;
   /** Check rate limit for a session: returns true if within allowed burst. */
   checkRateLimit(sessionId: string): Promise<boolean>;
+  /** Diagnostic dump of this DO's jobs table schema/job count. */
+  diag(): Promise<Record<string, unknown>>;
+  /** Register a session as active so batch claim can fan out to it. */
+  registerSession(sessionId: string): Promise<void>;
+  /** Return recently-active session IDs stored in this DO's registry. */
+  getActiveSessions(): Promise<string[]>;
+  /** Extend the lease on a claimed job. Returns the updated job or null. */
+  renewLease(jobId: string, workerId?: string): Promise<Job | null>;
 }

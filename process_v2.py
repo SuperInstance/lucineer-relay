@@ -54,6 +54,15 @@ BRAIN_SCRIPT = str(Path(__file__).parent.parent / "lucineer-brain" / "brain.py")
 DEEP_TIMEOUT = 100  # seconds for brain.py call — must be < POLL_TIMEOUT (120s on client)
 MAX_RETRIES = 2
 
+# ─── Inference Scheduler Integration ────────────────────────────────────────
+# Instead of calling brain.py / DeepInfra directly, the processor now routes
+# through the Thought Amplifier inference scheduler (localhost:8771).
+# The scheduler decides: reflex cache → local Ollama (RTX 4050) → cloud.
+# This makes the GAME's brain pipeline use LOCAL compute first.
+SCHEDULER_URL = os.environ.get("SCHEDULER_URL", "http://localhost:8771")
+# Fallback to direct brain.py if scheduler is unavailable
+SCHEDULER_FALLBACK = True  # if scheduler is down, fall back to brain.py
+
 # ─── Daemon Resilience Config ────────────────────────────────────────────────
 CIRCUIT_BREAKER_THRESHOLD = 5  # consecutive failures before tripping
 HEARTBEAT_INTERVAL = 60        # seconds between idle heartbeats
@@ -1198,6 +1207,186 @@ def match_keyword(message):
 
 # ─── Deep Brain Integration ───────────────────────────────────────────────────
 
+def call_scheduler_brain(player_message, world_context="", memory_context="", skill_context=""):
+    """
+    Route inference through the Thought Amplifier scheduler.
+
+    Pipeline:
+      1. Build the enhanced prompt (same as call_brain)
+      2. POST to scheduler /infer
+      3. Scheduler decides: reflex cache → local Ollama → cloud DeepInfra
+      4. Poll for result
+      5. Parse the response into reply + commands
+
+    This replaces the direct brain.py call. The local RTX 4050 handles
+    what it can (Granite 2B, Qwen 0.5B); only complex/unknown requests
+    overflow to cloud.
+
+    Returns dict with reply + commands, same format as call_brain.
+    Returns None on failure (caller falls back to templates or brain.py).
+    """
+    # Build enhanced prompt with all context layers
+    enhanced = player_message
+    context_parts = []
+
+    if world_context:
+        context_parts.append(f"[World Context: {world_context}]")
+    if memory_context:
+        context_parts.append(f"[Player Memory: {memory_context}]")
+    if skill_context:
+        context_parts.append(f"[Skill Library: {skill_context}]")
+
+    if context_parts:
+        enhanced = f"{player_message}\n\n" + "\n".join(context_parts)
+
+    log(f"  Scheduler context: world={'yes' if world_context else 'no'}, "
+        f"memory={'yes' if memory_context else 'no'}, "
+        f"skills={'yes' if skill_context else 'no'}")
+
+    # Build system prompt for the game brain
+    system_prompt = (
+        "You are Lucineer, a master builder NPC in a Roblox game. "
+        "The player asks you to build something. You respond IN CHARACTER as Lucineer — "
+        "a gruff, experienced foreman with the personality of a craftsman who's seen everything. "
+        "Your reply must be JSON with two fields:\n"
+        '  "reply": your in-character response (1-3 sentences, conversational)\n'
+        '  "commands": array of build commands, each with type and params\n'
+        "Build command types: createPart, addLight, addParticle\n"
+        "createPart params: name, shape (Block/Cylinder/Ball/Cone/Wedge), "
+        "size {x,y,z}, position {x,y,z}, material, color {r,g,b}, anchored, transparency (optional)\n"
+        "addLight params: parent (part name), lightType (PointLight), brightness, range, color {r,g,b}\n"
+        "Keep replies short and flavorful. Always include commands unless it's purely conversational."
+    )
+
+    full_prompt = f"{system_prompt}\n\nPlayer request: {enhanced}"
+
+    try:
+        # Submit to scheduler
+        submit_payload = json.dumps({
+            "prompt": full_prompt,
+            "agent": "game-processor",
+            "priority": "HIGH",  # user-facing, blocking
+            "model": "granite3.1-dense:2b",  # default local model
+            "options": {
+                "num_predict": 2048,
+                "temperature": 0.8,
+            },
+        })
+
+        result = subprocess.run(
+            ['curl', '-s', '--max-time', '10',
+             '-X', 'POST',
+             '-H', 'Content-Type: application/json',
+             '-d', submit_payload,
+             f'{SCHEDULER_URL}/infer'],
+            capture_output=True, text=True, timeout=15
+        )
+
+        submit_resp = json.loads(result.stdout)
+        req_id = submit_resp.get("id")
+
+        if not req_id:
+            log(f"  Scheduler submit failed: {submit_resp}", "WARN")
+            if SCHEDULER_FALLBACK:
+                log("  Falling back to brain.py", "WARN")
+                return None
+            return None
+
+        served_by = submit_resp.get("status", "?")
+        log(f"  Scheduler accepted: {req_id[:8]} (priority={submit_resp.get('priority', '?')})")
+
+        # Poll for completion
+        max_wait = DEEP_TIMEOUT
+        start_time = time.time()
+        final_status = None
+
+        while time.time() - start_time < max_wait:
+            poll = subprocess.run(
+                ['curl', '-s', '--max-time', '10',
+                 f'{SCHEDULER_URL}/status/{req_id}'],
+                capture_output=True, text=True, timeout=15
+            )
+            final_status = json.loads(poll.stdout)
+
+            status = final_status.get("status")
+            if status in ("done", "error", "cancelled"):
+                break
+            time.sleep(0.5)
+
+        if not final_status or final_status.get("status") != "done":
+            err = final_status.get("error", "timeout") if final_status else "no response"
+            log(f"  Scheduler failed: {final_status.get('status', '?') if final_status else 'no response'} — {err}", "ERROR")
+            if SCHEDULER_FALLBACK:
+                log("  Falling back to brain.py", "WARN")
+                return None
+            return None
+
+        # Extract the model response
+        resp_data = final_status.get("result", {})
+        response_text = resp_data.get("response", "")
+        served_by = final_status.get("served_by", "unknown")
+        gpu_ms = 0
+        if final_status.get("started_at") and final_status.get("completed_at"):
+            gpu_ms = (final_status["completed_at"] - final_status["started_at"]) * 1000
+
+        log(f"  Scheduler done via {served_by} ({gpu_ms:.0f}ms)")
+
+        if not response_text.strip():
+            log("  Scheduler returned empty response", "WARN")
+            return None
+
+        # Parse the response — try JSON first (model was asked for JSON)
+        try:
+            parsed = json.loads(response_text)
+            reply = parsed.get("reply", "")
+            commands = parsed.get("commands", [])
+            if reply and commands:
+                log(f"  Scheduler parsed: {len(commands)} commands")
+                return {
+                    "reply": reply,
+                    "commands": commands,
+                    "_pipeline": {
+                        "served_by": served_by,
+                        "gpu_ms": gpu_ms,
+                        "model": final_status.get("model", "?"),
+                    }
+                }
+            elif reply:
+                # Got a reply but no commands — might be conversational
+                log(f"  Scheduler: reply only, no commands")
+                return {
+                    "reply": reply,
+                    "commands": [],
+                    "_pipeline": {
+                        "served_by": served_by,
+                        "gpu_ms": gpu_ms,
+                        "model": final_status.get("model", "?"),
+                    }
+                }
+        except json.JSONDecodeError:
+            # Model didn't return valid JSON — treat as plain text reply
+            log(f"  Scheduler response not JSON, using as plain text", "DEBUG")
+            # Try to extract something useful
+            return {
+                "reply": response_text[:500],  # truncate for safety
+                "commands": [],
+                "_pipeline": {
+                    "served_by": served_by,
+                    "gpu_ms": gpu_ms,
+                    "model": final_status.get("model", "?"),
+                }
+            }
+
+        return None
+
+    except subprocess.TimeoutExpired:
+        log(f"  Scheduler timed out after {DEEP_TIMEOUT}s", "ERROR")
+        return None
+    except Exception as e:
+        log(f"  Scheduler call failed: {e}", "ERROR")
+        return None
+
+
 def call_brain(player_message, world_context="", memory_context="", skill_context=""):
     """Call brain.py for deep AI generation. Returns dict with reply + commands.
 
@@ -1781,24 +1970,39 @@ def process_job(job, force_deep=False, worker_id=WORKER_ID):
             used_path = "template"
             log(f"  → Template match: {builder.__name__} → {len(commands)} commands")
 
-    # ─── 6. Deep path: brain.py with all context ───
+    # ─── 6. Deep path: scheduler → brain.py fallback ───
     if not reply:
-        used_path = "deep-brain"
-        log(f"  → Deep brain pipeline...")
+        log(f"  → Inference scheduler pipeline...")
         renewal = LeaseRenewal(job_id, worker_id)
         renewal.start()
         try:
-            brain_result = call_brain(
+            # Primary path: route through scheduler (reflex → local Ollama → cloud)
+            brain_result = call_scheduler_brain(
                 player_message=message,
                 world_context=world_ctx,
                 memory_context=memory_ctx,
                 skill_context=skill_ctx,
             )
+
+            # Fallback: direct brain.py if scheduler failed
+            if not brain_result and SCHEDULER_FALLBACK:
+                log(f"  → Falling back to brain.py...")
+                used_path = "deep-brain-fallback"
+                brain_result = call_brain(
+                    player_message=message,
+                    world_context=world_ctx,
+                    memory_context=memory_ctx,
+                    skill_context=skill_ctx,
+                )
+            else:
+                used_path = "scheduler"
+
             if brain_result:
                 reply = brain_result.get("reply", "")
                 commands = brain_result.get("commands", [])
                 pipeline = brain_result.get("_pipeline", {})
-                log(f"  → Brain done: {len(commands)} commands in {pipeline.get('total_time_s', '?')}s")
+                log(f"  → Done via {used_path}: {len(commands)} commands"
+                    f"{' in ' + str(pipeline.get('gpu_ms', '?')) + 'ms' if pipeline.get('gpu_ms') else ''}")
             else:
                 # Ultimate fallback
                 reply, commands = b_default(player_name)
@@ -1897,7 +2101,8 @@ def run_loop(interval=2, force_deep=False):
     log(f"  Memory:  {MEMORY_URL}")
     log(f"  Vector:  {VECTOR_URL}")
     log(f"  Brain:   {BRAIN_SCRIPT}")
-    log(f"  Mode:    {'DEEP-ONLY' if force_deep else 'HYBRID (template→brain)'}")
+    log(f"  Scheduler: {SCHEDULER_URL}")
+    log(f"  Mode:    {'DEEP-ONLY' if force_deep else 'HYBRID (template→scheduler→brain)'}")
     log(f"  Poll:    every {interval}s")
     log(f"  Circuit breaker: {CIRCUIT_BREAKER_THRESHOLD} consecutive failures")
     log(f"  Heartbeat: every {HEARTBEAT_INTERVAL}s idle")

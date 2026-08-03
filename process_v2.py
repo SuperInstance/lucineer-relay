@@ -1820,7 +1820,7 @@ def save_to_memory(job_id, session_id, player_name, message, reply, commands,
 # ─── Main Loops ───────────────────────────────────────────────────────────────
 
 def run_once(force_deep=False):
-    data = api_get("/api/jobs/pending")
+    data = api_post("/api/jobs/claim", {"workerId": "processor-1", "limit": 5})
     jobs = data.get("jobs", [])
     if not jobs:
         return 0

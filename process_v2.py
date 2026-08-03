@@ -766,15 +766,41 @@ def b_tree(px, py, pz):
     return ("Trunk's deep, canopy's wide. Magnus'd say the roots do the real work — I just build what shows.", cmds)
 
 def b_bridge(px, py, pz):
-    return ("Spans clean — deck, rails, piles at the banks. Could've arched it but you didn't ask for pretty, you asked for strong.", [
-        {"type":"createPart","params":{"name":"BridgeDeck","shape":"Block","size":{"x":6,"y":1,"z":24},"position":{"x":px,"y":py+3,"z":pz},"material":"WoodPlanks","color":{"r":120,"g":80,"b":45},"anchored":True}},
-        {"type":"createPart","params":{"name":"BridgeSupport1","shape":"Cylinder","size":{"x":2,"y":6,"z":2},"position":{"x":px,"y":py,"z":pz-8},"material":"Wood","color":{"r":90,"g":60,"b":35},"anchored":True}},
-        {"type":"createPart","params":{"name":"BridgeSupport2","shape":"Cylinder","size":{"x":2,"y":6,"z":2},"position":{"x":px,"y":py,"z":pz+8},"material":"Wood","color":{"r":90,"g":60,"b":35},"anchored":True}},
-        {"type":"createPart","params":{"name":"BridgeRailL","shape":"Block","size":{"x":0.5,"y":2,"z":24},"position":{"x":px-3,"y":py+4,"z":pz},"material":"WoodPlanks","color":{"r":100,"g":70,"b":40},"anchored":True}},
-        {"type":"createPart","params":{"name":"BridgeRailR","shape":"Block","size":{"x":0.5,"y":2,"z":24},"position":{"x":px+3,"y":py+4,"z":pz},"material":"WoodPlanks","color":{"r":100,"g":70,"b":40},"anchored":True}},
-        {"type":"createPart","params":{"name":"BridgeLantern","shape":"Ball","size":{"x":1,"y":1,"z":1},"position":{"x":px,"y":py+6,"z":pz+10},"material":"Neon","color":{"r":255,"g":200,"b":100},"anchored":True}},
-        {"type":"addLight","params":{"parent":"BridgeLantern","lightType":"PointLight","brightness":3,"range":15,"color":{"r":255,"g":200,"b":100}}},
-    ])
+    cmds = []
+    # --- Arched stone supports from the valley's original crossing ---
+    for i, dz in enumerate([-10, 0, 10]):
+        cmds.append({"type":"createPart","params":{"name":f"BridgeArch{i}","shape":"Block","size":{"x":8,"y":8,"z":2},"position":{"x":px,"y":py-1,"z":pz+dz},"material":"Cobblestone","color":{"r":130,"g":125,"b":118},"anchored":True}})
+        cmds.append({"type":"createPart","params":{"name":f"BridgeArchPier{i}","shape":"Cylinder","size":{"x":3,"y":10,"z":3},"position":{"x":px,"y":py-3,"z":pz+dz},"material":"Stone","color":{"r":115,"g":110,"b":103},"anchored":True}})
+    # --- Deck planks: salvaged from the old trestle bridge ---
+    cmds.append({"type":"createPart","params":{"name":"BridgeDeck","shape":"Block","size":{"x":7,"y":1,"z":28},"position":{"x":px,"y":py+3,"z":pz},"material":"WoodPlanks","color":{"r":120,"g":80,"b":45},"anchored":True}})
+    # --- Worn replacement plank — lighter color, slightly raised ---
+    cmds.append({"type":"createPart","params":{"name":"BridgeWornPlank","shape":"Block","size":{"x":7,"y":0.2,"z":2},"position":{"x":px,"y":py+3.6,"z":pz-3},"material":"WoodPlanks","color":{"r":160,"g":120,"b":75},"anchored":True}})
+    # --- Side rails: hand-hewn timber ---
+    cmds.append({"type":"createPart","params":{"name":"BridgeRailL","shape":"Block","size":{"x":0.5,"y":3,"z":28},"position":{"x":px-3.5,"y":py+4.5,"z":pz},"material":"WoodPlanks","color":{"r":100,"g":70,"b":40},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"BridgeRailR","shape":"Block","size":{"x":0.5,"y":3,"z":28},"position":{"x":px+3.5,"y":py+4.5,"z":pz},"material":"WoodPlanks","color":{"r":100,"g":70,"b":40},"anchored":True}})
+    # --- Vertical rail posts ---
+    for i, dz in enumerate([-12, -6, 0, 6, 12]):
+        cmds.append({"type":"createPart","params":{"name":f"BridgeRailPostL{i}","shape":"Cylinder","size":{"x":0.4,"y":4,"z":0.4},"position":{"x":px-3.5,"y":py+5,"z":pz+dz},"material":"Wood","color":{"r":90,"g":60,"b":35},"anchored":True}})
+        cmds.append({"type":"createPart","params":{"name":f"BridgeRailPostR{i}","shape":"Cylinder","size":{"x":0.4,"y":4,"z":0.4},"position":{"x":px+3.5,"y":py+5,"z":pz+dz},"material":"Wood","color":{"r":90,"g":60,"b":35},"anchored":True}})
+    # --- Roof structure: trusses and shingled peaks ---
+    cmds.append({"type":"createPart","params":{"name":"BridgeRoofBeam","shape":"Block","size":{"x":0.6,"y":0.6,"z":28},"position":{"x":px,"y":py+11,"z":pz},"material":"Wood","color":{"r":85,"g":55,"b":30},"anchored":True}})
+    for i, dz in enumerate([-12, -6, 0, 6, 12]):
+        cmds.append({"type":"createPart","params":{"name":f"BridgeRoofPostL{i}","shape":"Cylinder","size":{"x":0.4,"y":6,"z":0.4},"position":{"x":px-3.5,"y":py+8,"z":pz+dz},"material":"Wood","color":{"r":88,"g":58,"b":33},"anchored":True}})
+        cmds.append({"type":"createPart","params":{"name":f"BridgeRoofPostR{i}","shape":"Cylinder","size":{"x":0.4,"y":6,"z":0.4},"position":{"x":px+3.5,"y":py+8,"z":pz+dz},"material":"Wood","color":{"r":88,"g":58,"b":33},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"BridgeRoofL","shape":"Wedge","size":{"x":9,"y":4,"z":28},"position":{"x":px,"y":py+12,"z":pz-7},"material":"WoodPlanks","color":{"r":80,"g":48,"b":25},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"BridgeRoofR","shape":"Wedge","size":{"x":9,"y":4,"z":28},"position":{"x":px,"y":py+12,"z":pz+7},"material":"WoodPlanks","color":{"r":75,"g":45,"b":22},"anchored":True}})
+    # --- Portal frames at both entrances ---
+    for side, sz in [("N", -14), ("S", 14)]:
+        cmds.append({"type":"createPart","params":{"name":f"BridgePortal{side}L","shape":"Block","size":{"x":1,"y":8,"z":1},"position":{"x":px-4,"y":py+7,"z":pz+sz},"material":"WoodPlanks","color":{"r":95,"g":65,"b":38},"anchored":True}})
+        cmds.append({"type":"createPart","params":{"name":f"BridgePortal{side}R","shape":"Block","size":{"x":1,"y":8,"z":1},"position":{"x":px+4,"y":py+7,"z":pz+sz},"material":"WoodPlanks","color":{"r":95,"g":65,"b":38},"anchored":True}})
+        cmds.append({"type":"createPart","params":{"name":f"BridgePortal{side}Top","shape":"Block","size":{"x":9,"y":1,"z":1},"position":{"x":px,"y":py+11,"z":pz+sz},"material":"WoodPlanks","color":{"r":90,"g":60,"b":35},"anchored":True}})
+    # --- Hanging lantern at each portal ---
+    for side, sz in [("N", -13), ("S", 13)]:
+        cmds.append({"type":"createPart","params":{"name":f"BridgeLantern{side}","shape":"Ball","size":{"x":1,"y":1,"z":1},"position":{"x":px,"y":py+9,"z":pz+sz},"material":"Neon","color":{"r":255,"g":200,"b":100},"anchored":True}})
+        cmds.append({"type":"addLight","params":{"parent":f"BridgeLantern{side}","lightType":"PointLight","brightness":3,"range":15,"color":{"r":255,"g":200,"b":100}}})
+    # --- Love-letter carved into the south portal rail ---
+    cmds.append({"type":"createPart","params":{"name":"BridgeCarving","shape":"Block","size":{"x":0.3,"y":0.3,"z":1.5},"position":{"x":px-3.7,"y":py+5,"z":pz+13.5},"material":"Neon","color":{"r":200,"g":180,"b":160},"anchored":True,"transparency":0.3}})
+    return ("Covered bridge — three arched stone piers from the valley's original crossing, deck planks salvaged from the old trestle. One plank's newer, replaced after the flood of '08. Sides are closed with timber and a shingled roof over the top. Portals at both ends with hanging lanterns, and someone carved their initials into the south rail. Spans clean and stays dry in the rain.", cmds)
 
 def b_wall(px, py, pz):
     cmds = []
@@ -990,6 +1016,82 @@ def b_lighthouse(px, py, pz):
     cmds.append({"type":"addParticle","params":{"parent":"LighthouseRock1","texture":"rbxassetid://258128463","rate":8,"lifetime":{"min":3,"max":6},"speed":{"min":0.5,"max":1.5},"color":{"r":200,"g":210,"b":220},"size":{"min":2,"max":4},"transparency":0.4,"velocity":{"x":0.5,"y":0,"z":0.5}}})
     return ("Lighthouse is lit — basalt bones from the cliff, shipwreck stone in the shaft, whitewash the keeper mixed himself, and a brass beacon he pulled off a freighter in '92. The cottage is driftwood, the winch still turns, and the fog's rolling in like always.", cmds)
 
+def b_cottage(px, py, pz):
+    cmds = []
+    # --- Stone foundation: river cobble, uneven on purpose ---
+    cmds.append({"type":"createPart","params":{"name":"CottageFoundation","shape":"Block","size":{"x":14,"y":1.5,"z":12},"position":{"x":px,"y":py+0.75,"z":pz},"material":"Cobblestone","color":{"r":132,"g":128,"b":120},"anchored":True}})
+    # --- Worn front step: granite slab cracked down the middle ---
+    cmds.append({"type":"createPart","params":{"name":"CottageFrontStep","shape":"Block","size":{"x":3,"y":0.5,"z":1.5},"position":{"x":px,"y":py+0.25,"z":pz+6.5},"material":"Slate","color":{"r":125,"g":120,"b":113},"anchored":True}})
+    # --- Main floor: warm-toned brick walls ---
+    cmds.append({"type":"createPart","params":{"name":"CottageWallN","shape":"Block","size":{"x":12,"y":7,"z":0.5},"position":{"x":px,"y":py+5,"z":pz-6},"material":"Brick","color":{"r":155,"g":125,"b":95},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"CottageWallS","shape":"Block","size":{"x":12,"y":7,"z":0.5},"position":{"x":px,"y":py+5,"z":pz+6},"material":"Brick","color":{"r":150,"g":120,"b":90},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"CottageWallW","shape":"Block","size":{"x":0.5,"y":7,"z":12},"position":{"x":px-6,"y":py+5,"z":pz},"material":"Brick","color":{"r":148,"g":118,"b":88},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"CottageWallE","shape":"Block","size":{"x":0.5,"y":7,"z":12},"position":{"x":px+6,"y":py+5,"z":pz},"material":"Brick","color":{"r":152,"g":122,"b":92},"anchored":True}})
+    # --- Patched wall section: different brick tone where the door was moved ---
+    cmds.append({"type":"createPart","params":{"name":"CottagePatch","shape":"Block","size":{"x":3,"y":4,"z":0.55},"position":{"x":px-3,"y":py+4,"z":pz+6.02},"material":"Brick","color":{"r":135,"g":108,"b":80},"anchored":True}})
+    # --- Window frames with glass and warm glow ---
+    for i, (wx, wz) in enumerate([(-4, -6), (4, -6)]):
+        cmds.append({"type":"createPart","params":{"name":f"CottageWindowFrame{i}","shape":"Block","size":{"x":3,"y":3,"z":0.6},"position":{"x":px+wx,"y":py+5,"z":pz+wz+0.2},"material":"Wood","color":{"r":90,"g":58,"b":32},"anchored":True}})
+        cmds.append({"type":"createPart","params":{"name":f"CottageWindowGlass{i}","shape":"Block","size":{"x":2.5,"y":2.5,"z":0.3},"position":{"x":px+wx,"y":py+5,"z":pz+wz+0.3},"material":"Glass","color":{"r":190,"g":215,"b":255},"anchored":True,"transparency":0.5,"reflectance":0.15}})
+        cmds.append({"type":"createPart","params":{"name":f"CottageWindowGlow{i}","shape":"Block","size":{"x":2,"y":2,"z":0.2},"position":{"x":px+wx,"y":py+5,"z":pz+wz+0.4},"material":"Neon","color":{"r":255,"g":200,"b":120},"anchored":True}})
+        cmds.append({"type":"addLight","params":{"parent":f"CottageWindowGlow{i}","lightType":"PointLight","brightness":3,"range":14,"color":{"r":255,"g":200,"b":120}}})
+    # --- Flower box under left window: petunias and something that reseeded itself ---
+    cmds.append({"type":"createPart","params":{"name":"CottageFlowerBox","shape":"Block","size":{"x":3.5,"y":0.5,"z":0.6},"position":{"x":px-4,"y":py+3,"z":pz-6.3},"material":"Wood","color":{"r":100,"g":65,"b":35},"anchored":True}})
+    for i, (fx, r, g, b) in enumerate([(-5.2, 255, 100, 100), (-4.5, 255, 220, 100), (-3.8, 200, 100, 255), (-3.0, 255, 150, 200)]):
+        cmds.append({"type":"createPart","params":{"name":f"CottageFlower{i}","shape":"Ball","size":{"x":0.4,"y":0.4,"z":0.4},"position":{"x":px+fx,"y":py+3.4,"z":pz-6.3},"material":"Neon","color":{"r":r,"g":g,"b":b},"anchored":True}})
+    # --- Peaked roof: wooden shingles, two slopes ---
+    cmds.append({"type":"createPart","params":{"name":"CottageRoofN","shape":"Wedge","size":{"x":14,"y":4,"z":7},"position":{"x":px,"y":py+10.5,"z":pz-3},"material":"WoodPlanks","color":{"r":85,"g":50,"b":28},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"CottageRoofS","shape":"Wedge","size":{"x":14,"y":4,"z":7},"position":{"x":px,"y":py+10.5,"z":pz+3},"material":"WoodPlanks","color":{"r":80,"g":47,"b":25},"anchored":True}})
+    # --- Chimney: brick with old soot staining (darker top) ---
+    cmds.append({"type":"createPart","params":{"name":"CottageChimneyBase","shape":"Block","size":{"x":2,"y":5,"z":2},"position":{"x":px+4,"y":py+10,"z":pz-3},"material":"Brick","color":{"r":110,"g":85,"b":72},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"CottageChimneyTop","shape":"Block","size":{"x":2,"y":2,"z":2},"position":{"x":px+4,"y":py+13.5,"z":pz-3},"material":"Brick","color":{"r":80,"g":60,"b":52},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"CottageChimneyCap","shape":"Block","size":{"x":2.5,"y":0.5,"z":2.5},"position":{"x":px+4,"y":py+14.8,"z":pz-3},"material":"Slate","color":{"r":100,"g":95,"b":88},"anchored":True}})
+    cmds.append({"type":"addParticle","params":{"parent":"CottageChimneyTop","texture":"rbxassetid://241876428","rate":5,"lifetime":{"min":2,"max":4},"speed":{"min":0.5,"max":1.5},"color":{"r":180,"g":180,"b":180},"size":{"min":0.8,"max":2},"transparency":0.3,"velocity":{"x":0,"y":2,"z":0}}})
+    # --- Door: plank wood with iron hinges ---
+    cmds.append({"type":"createPart","params":{"name":"CottageDoor","shape":"Block","size":{"x":2.5,"y":4.5,"z":0.4},"position":{"x":px,"y":py+3,"z":pz+6.2},"material":"WoodPlanks","color":{"r":95,"g":60,"b":32},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"CottageDoorHingeL","shape":"Cylinder","size":{"x":0.2,"y":3,"z":0.2},"position":{"x":px-1,"y":py+4,"z":pz+6.3},"material":"Metal","color":{"r":70,"g":65,"b":60},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"CottageDoorHingeR","shape":"Cylinder","size":{"x":0.2,"y":3,"z":0.2},"position":{"x":px+1,"y":py+4,"z":pz+6.3},"material":"Metal","color":{"r":70,"g":65,"b":60},"anchored":True}})
+    # --- Door knocker: iron ring on a plate ---
+    cmds.append({"type":"createPart","params":{"name":"CottageDoorKnocker","shape":"Ball","size":{"x":0.5,"y":0.5,"z":0.5},"position":{"x":px,"y":py+4.5,"z":pz+6.5},"material":"Metal","color":{"r":60,"g":55,"b":50},"anchored":True}})
+    return ("Cozy cottage — river-cobble foundation, warm brick walls, patched where the old door used to be before they moved it. Windows glow warm, flower box is blooming with whatever reseeded itself. Shingled peaked roof, chimney's soot-stained at the top and still smoking. Iron door knocker's been there since the first owner.", cmds)
+
+def b_well(px, py, pz):
+    cmds = []
+    # --- Stone base: compacted gravel and flat fieldstone ---
+    cmds.append({"type":"createPart","params":{"name":"WellBase","shape":"Block","size":{"x":8,"y":0.5,"z":8},"position":{"x":px,"y":py+0.25,"z":pz},"material":"Ground","color":{"r":110,"g":100,"b":85},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"WellPaving","shape":"Block","size":{"x":7,"y":0.4,"z":7},"position":{"x":px,"y":py+0.5,"z":pz},"material":"Slate","color":{"r":140,"g":135,"b":128},"anchored":True}})
+    # --- Worn step stone where generations stood to crank the bucket ---
+    cmds.append({"type":"createPart","params":{"name":"WellWornStep","shape":"Block","size":{"x":3,"y":0.3,"z":1.5},"position":{"x":px,"y":py+0.65,"z":pz+3.5},"material":"Slate","color":{"r":125,"g":118,"b":108},"anchored":True}})
+    # --- Stone well ring: Cobblestone, three tiers for depth ---
+    cmds.append({"type":"createPart","params":{"name":"WellRingBase","shape":"Cylinder","size":{"x":5,"y":1.5,"z":5},"position":{"x":px,"y":py+1.5,"z":pz},"material":"Cobblestone","color":{"r":130,"g":125,"b":118},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"WellRingMid","shape":"Cylinder","size":{"x":4.5,"y":1,"z":4.5},"position":{"x":px,"y":py+2.75,"z":pz},"material":"Cobblestone","color":{"r":125,"g":120,"b":113},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"WellRingTop","shape":"Cylinder","size":{"x":5,"y":0.8,"z":5},"position":{"x":px,"y":py+3.65,"z":pz},"material":"Stone","color":{"r":140,"g":135,"b":128},"anchored":True}})
+    # --- Water surface deep inside ---
+    cmds.append({"type":"createPart","params":{"name":"WellWater","shape":"Cylinder","size":{"x":3.5,"y":0.3,"z":3.5},"position":{"x":px,"y":py+1.5,"z":pz},"material":"Glass","color":{"r":100,"g":150,"b":200},"anchored":True,"transparency":0.6,"reflectance":0.3}})
+    # --- Wooden crossbeam supports ---
+    cmds.append({"type":"createPart","params":{"name":"WellPostL","shape":"Cylinder","size":{"x":0.6,"y":6,"z":0.6},"position":{"x":px-2,"y":py+5,"z":pz},"material":"Wood","color":{"r":95,"g":62,"b":35},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"WellPostR","shape":"Cylinder","size":{"x":0.6,"y":6,"z":0.6},"position":{"x":px+2,"y":py+5,"z":pz},"material":"Wood","color":{"r":95,"g":62,"b":35},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"WellCrossBeam","shape":"Block","size":{"x":5,"y":0.8,"z":0.8},"position":{"x":px,"y":py+8,"z":pz},"material":"WoodPlanks","color":{"r":100,"g":68,"b":40},"anchored":True}})
+    # --- Roof: small peaked shingle cover ---
+    cmds.append({"type":"createPart","params":{"name":"WellRoofL","shape":"Wedge","size":{"x":6,"y":2.5,"z":3},"position":{"x":px,"y":py+10,"z":pz-1.5},"material":"WoodPlanks","color":{"r":85,"g":50,"b":25},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"WellRoofR","shape":"Wedge","size":{"x":6,"y":2.5,"z":3},"position":{"x":px,"y":py+10,"z":pz+1.5},"material":"WoodPlanks","color":{"r":80,"g":47,"b":22},"anchored":True}})
+    # --- Bucket arm: wooden crank mechanism ---
+    cmds.append({"type":"createPart","params":{"name":"WellBucketArm","shape":"Block","size":{"x":0.4,"y":0.4,"z":4},"position":{"x":px,"y":py+7.5,"z":pz},"material":"Wood","color":{"r":90,"g":58,"b":32},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"WellCrank","shape":"Cylinder","size":{"x":1,"y":1,"z":1},"position":{"x":px+2.5,"y":py+7,"z":pz},"material":"Metal","color":{"r":85,"g":80,"b":75},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"WellCrankHandle","shape":"Block","size":{"x":1.5,"y":0.3,"z":0.3},"position":{"x":px+3.5,"y":py+7,"z":pz},"material":"Wood","color":{"r":100,"g":70,"b":40},"anchored":True}})
+    # --- Rope: twisted detail hanging from arm to bucket ---
+    cmds.append({"type":"createPart","params":{"name":"WellRope","shape":"Cylinder","size":{"x":0.2,"y":4,"z":0.2},"position":{"x":px,"y":py+5.5,"z":pz},"material":"Wood","color":{"r":130,"g":100,"b":65},"anchored":True}})
+    # --- Wooden bucket with iron bands ---
+    cmds.append({"type":"createPart","params":{"name":"WellBucket","shape":"Cylinder","size":{"x":1,"y":1.2,"z":1},"position":{"x":px,"y":py+3.5,"z":pz},"material":"WoodPlanks","color":{"r":105,"g":72,"b":42},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"WellBucketBand","shape":"Cylinder","size":{"x":1.1,"y":0.2,"z":1.1},"position":{"x":px,"y":py+3.8,"z":pz},"material":"Metal","color":{"r":75,"g":70,"b":65},"anchored":True}})
+    # --- Lantern hook: iron bracket on left post (the well-keeper's marker) ---
+    cmds.append({"type":"createPart","params":{"name":"WellLanternHook","shape":"Block","size":{"x":1,"y":0.3,"z":0.3},"position":{"x":px-2.5,"y":py+7,"z":pz},"material":"Metal","color":{"r":65,"g":60,"b":55},"anchored":True}})
+    cmds.append({"type":"createPart","params":{"name":"WellLantern","shape":"Ball","size":{"x":0.8,"y":0.8,"z":0.8},"position":{"x":px-2.8,"y":py+6.5,"z":pz},"material":"Neon","color":{"r":255,"g":200,"b":100},"anchored":True}})
+    cmds.append({"type":"addLight","params":{"parent":"WellLantern","lightType":"PointLight","brightness":3,"range":12,"color":{"r":255,"g":200,"b":100}}})
+    # --- Moss detail on the north side of the ring ---
+    cmds.append({"type":"createPart","params":{"name":"WellMoss","shape":"Block","size":{"x":2,"y":1,"z":0.3},"position":{"x":px,"y":py+1.8,"z":pz-2.3},"material":"Grass","color":{"r":45,"g":100,"b":35},"anchored":True}})
+    return ("Stone well — fieldstone paving, cobble ring three tiers deep with water you can see if you lean over. The step stone's worn smooth from generations of bucket-cranking. Wooden crossbeam, peaked shingle roof, iron crank with a rope down to the bucket. Lantern hangs on the hook the well-keeper left, and moss is creeping up the north side like it does.", cmds)
+
 def b_default(player_name):
     return ("Couldn't match that to anything in the yard. Tell me what you're building — a tower, a house, a bridge. Give me a shape and I'll give you a structure.", [
         {"type":"createPart","params":{"name":"MarkerBlock","shape":"Block","size":{"x":2,"y":2,"z":2},"position":{"x":0,"y":10,"z":0},"material":"Metal","color":{"r":120,"g":115,"b":110},"anchored":True}},
@@ -1001,7 +1103,9 @@ KEYWORDS = {
     'tower': b_tower, 'spire': b_tower, 'pillar': b_tower,
     'lookout': b_lookout, 'watchtower': b_lookout, 'scout': b_lookout,
     'lighthouse': b_lighthouse, 'beacon': b_lighthouse,
-    'house': b_house, 'cabin': b_house, 'cottage': b_house, 'home': b_house, 'shack': b_house,
+    'house': b_house, 'cabin': b_house, 'home': b_house, 'shack': b_house,
+    'cottage': b_cottage, 'cottage house': b_cottage,
+    'well': b_well, 'water well': b_well, 'wishwell': b_well, 'wishing well': b_well,
     'castle': b_castle, 'fortress': b_castle, 'fort': b_castle, 'keep': b_castle, 'citadel': b_castle, 'palace': b_castle,
     'tree': b_tree, 'oak': b_tree, 'pine': b_tree, 'forest': b_tree, 'bush': b_tree,
     'bridge': b_bridge, 'crossing': b_bridge,

@@ -1,10 +1,9 @@
-// Auto-generated build templates for the fast path.
-// Extracted from process_v2.py — do not edit by hand.
-// Regenerate with: python3 -c see scripts/export-templates.py
+// Auto-generated build templates for the Worker fast path.
+// Extracted from process_v2.py build functions + CHARACTER_BIBLE voice lines.
+// Each template returns instantly with commands + a Lucineier voice line.
 
 export interface BuildCommand {
   type: string;
-  target?: string;
   params: Record<string, unknown>;
 }
 
@@ -15,7 +14,6 @@ export interface BuildTemplate {
 
 export const BUILD_TEMPLATES: Record<string, BuildTemplate> = {
   "tower": {
-    "description": "Threw up a tower \u2014 stone shaft, battlements, beacon on top. Lantern's lit but I left the top floor open. Figure out what goes in it.",
     "commands": [
       {
         "type": "createPart",
@@ -103,10 +101,10 @@ export const BUILD_TEMPLATES: Record<string, BuildTemplate> = {
           }
         }
       }
-    ]
+    ],
+    "reply": "Stone shaft's up, battlements are on, beacon's lit. Top floor's open \u2014 didn't know what you wanted up there."
   },
   "house": {
-    "description": "Four walls, stone foundation, peaked shingle roof \u2014 chimney's smoking, window's glowing, flowers in the box. Door step's in. I didn't build the door itself \u2014 figured you'd want to pick the style.",
     "commands": [
       {
         "type": "createPart",
@@ -587,10 +585,10 @@ export const BUILD_TEMPLATES: Record<string, BuildTemplate> = {
           }
         }
       }
-    ]
+    ],
+    "reply": "Foundation's set, walls are brick, roof's pitched and the chimney's drawing. Didn't hang the door \u2014 figured you'd want to pick it."
   },
   "castle": {
-    "description": "Castle's up \u2014 four tower walls in mixed stone, banners flying, torches lit along the parapet. Gravel path from the portcullis to the keep, weapon rack by the door, flag on the roof. Even a foreman needs something to do \u2014 I left the murder holes for you.",
     "commands": [
       {
         "type": "createPart",
@@ -1246,10 +1244,10 @@ export const BUILD_TEMPLATES: Record<string, BuildTemplate> = {
           }
         }
       }
-    ]
+    ],
+    "reply": "Walls are up, towers are capped, banners are flying. Left the murder holes off \u2014 seemed like your department."
   },
   "bridge": {
-    "description": "Covered bridge \u2014 three arched stone piers from the valley's original crossing, deck planks salvaged from the old trestle. One plank's newer, replaced after the flood of '08. Sides are closed with timber and a shingled roof over the top. Portals at both ends with hanging lanterns, and someone carved their initials into the south rail. Spans clean and stays dry in the rain.",
     "commands": [
       {
         "type": "createPart",
@@ -2288,10 +2286,10 @@ export const BUILD_TEMPLATES: Record<string, BuildTemplate> = {
           "transparency": 0.3
         }
       }
-    ]
+    ],
+    "reply": "Piers are seated, deck's laid, roof's on. Didn't bolt the cleats down. Depends what you're tying off."
   },
   "windmill": {
-    "description": "Windmill's turning again \u2014 fieldstone base from the original build, brick lower floor, timber patched in after the lightning strike, and a metal cap scavenged from the railway yard. The sails are patched canvas; one panel's still red from the miller's daughter's wagon. Lantern's lit by the door so he finds his way home.",
     "commands": [
       {
         "type": "createPart",
@@ -2654,10 +2652,10 @@ export const BUILD_TEMPLATES: Record<string, BuildTemplate> = {
           }
         }
       }
-    ]
+    ],
+    "reply": "Tower's rebuilt \u2014 stone base, brick lower, timber up top where the fire got it. Sails are balanced but the grain chute is still empty. Haven't sourced the stones."
   },
   "garden": {
-    "description": "Garden's taken back the old plaza \u2014 concrete slabs cracked, grass pushing through, rusted trellis where the bandstand stood. Someone strung neon vines after the blackout, and the fountain still weeps. Bench is cut from the chestnut that came down in the storm.",
     "commands": [
       {
         "type": "createPart",
@@ -3312,10 +3310,10 @@ export const BUILD_TEMPLATES: Record<string, BuildTemplate> = {
           }
         }
       }
-    ]
+    ],
+    "reply": "Plaza's reclaimed, beds are in, fountain's weeping. Trellis is up but I didn't plant anything on it. That's your call."
   },
   "dock": {
-    "description": "Piles driven deep, planks laid with the grain running right. Cargo stacked at the end, mooring posts with rope, lanterns lit every eight studs. There's a perch post for the gulls and the water's lapping underneath \u2014 same sound I heard at the cannery every morning for six years.",
     "commands": [
       {
         "type": "createPart",
@@ -3845,10 +3843,10 @@ export const BUILD_TEMPLATES: Record<string, BuildTemplate> = {
           }
         }
       }
-    ]
+    ],
+    "reply": "Piles are driven, planks are down, mooring posts are set. Didn't rig the bumpers \u2014 different boats need different ones."
   },
   "lighthouse": {
-    "description": "Lighthouse is lit \u2014 basalt bones from the cliff, shipwreck stone in the shaft, whitewash the keeper mixed himself, and a brass beacon he pulled off a freighter in '92. The cottage is driftwood, the winch still turns, and the fog's rolling in like always.",
     "commands": [
       {
         "type": "createPart",
@@ -4200,10 +4198,10 @@ export const BUILD_TEMPLATES: Record<string, BuildTemplate> = {
           }
         }
       }
-    ]
+    ],
+    "reply": "Tower's up, beacon's lit, keeper's cottage is sealed in. Boat winch is mounted but I didn't run the cable. Didn't want to guess the length."
   },
   "cottage": {
-    "description": "Cozy cottage \u2014 river-cobble foundation, warm brick walls, patched where the old door used to be before they moved it. Windows glow warm, flower box is blooming with whatever reseeded itself. Shingled peaked roof, chimney's soot-stained at the top and still smoking. Iron door knocker's been there since the first owner.",
     "commands": [
       {
         "type": "createPart",
@@ -4916,10 +4914,10 @@ export const BUILD_TEMPLATES: Record<string, BuildTemplate> = {
           "anchored": true
         }
       }
-    ]
+    ],
+    "reply": "Foundation's cobble, walls are warm brick, roof's pitched and the chimney's smoking. Flower box is up but I didn't plant anything. Didn't want to pick the wrong seeds."
   },
   "well": {
-    "description": "Stone well \u2014 fieldstone paving, cobble ring three tiers deep with water you can see if you lean over. The step stone's worn smooth from generations of bucket-cranking. Wooden crossbeam, peaked shingle roof, iron crank with a rope down to the bucket. Lantern hangs on the hook the well-keeper left, and moss is creeping up the north side like it does.",
     "commands": [
       {
         "type": "createPart",
@@ -5441,6 +5439,7 @@ export const BUILD_TEMPLATES: Record<string, BuildTemplate> = {
           "anchored": true
         }
       }
-    ]
+    ],
+    "reply": "Stone ring's laid, water's in, bucket's on the rope. Roof is up but I left the crank handle loose. Tighten it when you've got a wrench."
   }
 };

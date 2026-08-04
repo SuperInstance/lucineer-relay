@@ -7,8 +7,80 @@ import type {
   Job,
   WorldSnapshot,
 } from "./types";
+import { BUILD_TEMPLATES, type BuildTemplate } from "./templates";
 
 export { LucineerSession };
+
+// ---------------------------------------------------------------------------
+// Fast Path — keyword matching for instant template responses
+// ---------------------------------------------------------------------------
+
+/**
+ * Keyword map: lowercase keyword → template key.
+ * Mirrors the matching logic in process_v2.py's KEYWORDS dict but
+ * trimmed to the 10 templates embedded in the Worker.
+ */
+const FAST_KEYWORDS: Record<string, string> = {
+  // Direct template names
+  tower: "tower", spire: "tower", pillar: "tower",
+  house: "house", cabin: "house", home: "house", shack: "house",
+  castle: "castle", fortress: "castle", fort: "castle", keep: "castle", citadel: "castle", palace: "castle",
+  bridge: "bridge", crossing: "bridge",
+  windmill: "windmill", mill: "windmill",
+  garden: "garden", park: "garden", yard: "garden", flowerbed: "garden",
+  dock: "dock", pier: "dock", wharf: "dock", jetty: "dock",
+  lighthouse: "lighthouse", beacon: "lighthouse",
+  cottage: "cottage",
+  well: "well", "water well": "well", wishwell: "well", "wishing well": "well",
+};
+
+/** Build verbs — at least one must be present for a keyword match. */
+const BUILD_VERB_RE = /\b(build|make|create|put|raise|place|add|give me|construct|throw up|put up)\b/i;
+
+/** Negation — if present, don't match. */
+const NEGATION_RE = /\b(don'?t|do not|never|stop|no|not)\b/i;
+
+/**
+ * Try to match a player message against the fast-path keyword templates.
+ * Returns the matched template + the canonical build name, or null.
+ *
+ * Matching rules (same as process_v2.py match_keyword):
+ *   1. Must contain a build verb (build, make, create, etc.)
+ *   2. Must NOT contain negation (don't build a...)
+ *   3. Longest keyword match wins (so 'castle' beats 'well' in 'build a castle well')
+ *   4. Word-boundary matching (so 'arc' doesn't match 'search')
+ */
+function matchFastPath(message: string): { template: BuildTemplate; buildName: string } | null {
+  const msgLower = message.toLowerCase();
+
+  // Must have a build verb
+  if (!BUILD_VERB_RE.test(msgLower)) return null;
+
+  // Must not have negation
+  if (NEGATION_RE.test(msgLower)) return null;
+
+  // Score all candidates, pick the longest keyword match
+  let bestKey: string | null = null;
+  let bestTemplate: string | null = null;
+
+  for (const [keyword, templateKey] of Object.entries(FAST_KEYWORDS)) {
+    // Word-boundary regex for this keyword
+    const re = new RegExp(`\\b${keyword.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
+    if (re.test(msgLower)) {
+      if (!bestKey || keyword.length > bestKey.length) {
+        bestKey = keyword;
+        bestTemplate = templateKey;
+      }
+    }
+  }
+
+  if (!bestTemplate) return null;
+
+  const template = BUILD_TEMPLATES[bestTemplate];
+  if (!template) return null;
+
+  return { template, buildName: bestTemplate };
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -127,6 +199,33 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   }
 
   // =====================================================================
+  // PUBLIC FAST PATH — GET /api/quick/:message
+  // No auth required. Returns a template instantly if the message
+  // matches a known build keyword. Designed for low-friction web game
+  // calls where setting up headers is cumbersome.
+  // =====================================================================
+  const quickMatch = path.match(/^\/api\/quick\/(.+)$/);
+  if (quickMatch && method === "GET") {
+    const message = decodeURIComponent(quickMatch[1]);
+    const fastMatch = matchFastPath(message);
+    if (fastMatch) {
+      return Response.json({
+        status: "complete",
+        reply: fastMatch.template.reply,
+        commands: fastMatch.template.commands,
+        source: "template",
+        buildName: fastMatch.buildName,
+        timestamp: Date.now(),
+      });
+    }
+    // No match — tell the caller to use the deep path
+    return Response.json({
+      status: "no_template",
+      message: "No quick template for that request. Use POST /api/message for the full brain pipeline.",
+    });
+  }
+
+  // =====================================================================
   // PUBLIC ENDPOINT — POST /api/message
   // No auth required (the Roblox client doesn't have the internal key).
   // Rate-limited per session to prevent abuse.
@@ -146,6 +245,24 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
       );
     }
 
+    // ── FAST PATH ────────────────────────────────────────────────────────
+    // Check for keyword-matched build templates BEFORE anything else —
+    // before rate limiting, before DO calls. Templates are pure computation
+    // and should return in under 200ms from the edge.
+    // ────────────────────────────────────────────────────────────────────
+    const fastMatch = matchFastPath(body.message);
+    if (fastMatch) {
+      return Response.json({
+        status: "complete",
+        reply: fastMatch.template.reply,
+        commands: fastMatch.template.commands,
+        source: "template",
+        buildName: fastMatch.buildName,
+        jobId: null,
+        timestamp: Date.now(),
+      });
+    }
+
     const stub = sessionStub(env, body.sessionId);
     const withinLimit = await stub.checkRateLimit(body.sessionId);
     if (!withinLimit) {
@@ -155,6 +272,9 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
       );
     }
 
+    // ── DEEP PATH ────────────────────────────────────────────────────────
+    // No template match — create a job for the brain pipeline.
+    // ────────────────────────────────────────────────────────────────────
     const { jobId } = await stub.createJob(body);
 
     // Register this session in the default DO's session registry so that

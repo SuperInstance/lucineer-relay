@@ -139,7 +139,7 @@ export interface TrajectoryEvent {
 
 export interface BuildCommand {
   type: string;
-  target: string;
+  target?: string;
   params: Record<string, unknown>;
 }
 

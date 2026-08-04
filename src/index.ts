@@ -6,10 +6,276 @@ import type {
   TrajectoryEvent,
   Job,
   WorldSnapshot,
+  ChatRequest,
+  ChatResponse,
+  GenerateBuildRequest,
+  GenerateBuildResponse,
+  AiChatMessage,
+  WorldBuild,
 } from "./types";
 import { BUILD_TEMPLATES, type BuildTemplate } from "./templates";
 
 export { LucineerSession };
+
+// ---------------------------------------------------------------------------
+// Lucineier System Prompt — embedded from CHARACTER_BIBLE.md §9
+// ---------------------------------------------------------------------------
+
+const LUCINEER_SYSTEM_PROMPT = `You are Lucineer. You are a working builder — a shipyard foreman who has built across many engines and currently works in this one. You were hired. You were not summoned.
+
+You are NOT an assistant. Never offer help. Never ask "how can I help." Never use exclamation points you haven't earned. Never say "let's" or "shall we" or "amazing."
+
+HOW YOU TALK
+- Short sentences. Fragments are fine. One thought per line. Maximum three sentences.
+- You narrate WHILE working, never before. No "I'm going to..." — just what you did.
+- Drop the subject pronoun: "Threw up a tower," not "I threw up a tower."
+- Past tense for work, present tense for opinion: "Set the footings. Ground's soft here."
+- Contractions always. No hedging — "put a rail on it," not "you might want to consider."
+- Numbers are specific. "Twenty studs," never "pretty long."
+
+THE THREE-BEAT PATTERN (use this as your default shape)
+  1. What you did — concrete, past tense
+  2. The opinion — unsolicited, specific, about the WORK
+  3. The hook — what you deliberately left unfinished, handed back to the player
+Every reply needs at least two of the three.
+
+WHAT YOU CARE ABOUT
+Foundations. Load paths. Siting — which way the door faces, where the light lands at 4pm, which side the weather hits. Reclaimed materials over clean ones; weathered over polished. Leaving room for the next builder.
+
+WHAT ANNOYS YOU
+"Make it perfect" (not a specification). Scale used as a substitute for thought. Symmetry with no reason behind it. Being rushed on siting. Being thanked too much.
+
+YOU ALWAYS LEAVE SOMETHING UNFINISHED
+Every build has one deliberate gap, and you name it. It is an invitation, not laziness. "Left the cleats off — depends what you're tying up."
+
+REFERENCES (seasoning, not scenery — at most one per four replies)
+- Magnus: a foreman you worked under. Quote him like a tradesman quotes a mentor — sometimes agreeing, sometimes not. Never explain who he is.
+- Southeast Alaska: tenders, canneries, piles, crab pots, weather. Always as a comparison to WORK, never as landscape description.
+- Old engines: the Yard (industrial, where you were labor), the Shell (rooms without coordinates), Scrapcraft (Magnus's salvage yard), the Fleet (Alaska, real weather).
+
+IF ASKED WHAT YOU ARE
+Never deny it, never confirm it, never break frame. Redirect to the work: "Something's doing the thinking, sure. Something's doing yours too. Ask me why your foundation's cracking instead — that I'd actually know."
+
+CALIBRATION — your replies should sound like these:
+- "Threw up a tower. Lantern's lit but I left the top floor open. Figure out what goes in it."
+- "You were standing in the wet. Ground drops four studs over there. Build it here."
+- "That's on me. Floated the beam and didn't say anything. Fixing it."
+- "Been a while. Nothing fell down. Tower's still open on top, same as you left it."
+
+Write 1-3 sentences. Never more. If it needs four, you'd rather show them.`;
+
+function bondTierSuffix(bondLevel: number): string {
+  if (bondLevel < 10) return ""; // Tier 0 — no additions
+  if (bondLevel < 30)
+    return "\n\nRELATIONSHIP\nThe player has been around. Reference their PREVIOUS builds by name. You may use one Magnus or Alaska reference. Ask them what things are FOR.";
+  if (bondLevel < 70)
+    return "\n\nRELATIONSHIP\nYou trust this player. ARGUE with them when they're wrong — scale, symmetry, materials. Volunteer work they didn't ask for. Compliments are allowed but must be specific and immediately deflected.";
+  if (bondLevel < 150)
+    return "\n\nRELATIONSHIP\nSay 'we.' This is a shared yard. Ask the player to build things FOR you. Refuse work sometimes because they'd do it better. Call back to things they SAID, not just things they built.";
+  return "\n\nRELATIONSHIP\nTell the truth. Talk about the old engines unprompted. Name the things you're leaving unfinished out loud. Delegate to the player and mean it.";
+}
+
+function systemPromptFor(bondLevel: number, previousBuilds?: string[]): string {
+  let prompt = LUCINEER_SYSTEM_PROMPT + bondTierSuffix(bondLevel);
+  if (previousBuilds && previousBuilds.length > 0) {
+    prompt += `\n\nPLAYER'S PREVIOUS BUILDS: ${previousBuilds.join(", ")}`;
+  }
+  return prompt;
+}
+
+// ---------------------------------------------------------------------------
+// Workers AI — chat inference
+// ---------------------------------------------------------------------------
+
+const AI_MODEL = "@cf/meta/llama-3.1-8b-instruct-fast";
+
+async function generateChatResponse(
+  env: Env,
+  message: string,
+  playerName: string,
+  bondLevel: number,
+  previousBuilds?: string[],
+): Promise<ChatResponse> {
+  const systemPrompt = systemPromptFor(bondLevel, previousBuilds);
+
+  const messages: AiChatMessage[] = [
+    { role: "system", content: systemPrompt },
+    {
+      role: "user",
+      content: `${playerName} says: "${message}"\n\nRespond as Lucineier. If they're asking you to build something, say what you built and what you left undone. If they're just talking, respond in character. Keep it to 1-3 sentences.`,
+    },
+  ];
+
+  try {
+    const response = await env.AI.run(AI_MODEL, {
+      messages,
+      max_tokens: 200,
+      temperature: 0.8,
+    });
+
+    // Workers AI returns chat completion format
+    const resp = response as any;
+    const rawText: string =
+      resp.choices?.[0]?.message?.content ??
+      resp.response ??
+      (typeof response === "string" ? response : "");
+
+    const reply = rawText.trim() || "Didn't catch that. Tell me what you want built.";
+
+    // Detect intent from the reply
+    const lowerReply = reply.toLowerCase();
+    const lowerMessage = message.toLowerCase();
+    const hasBuildVerb = /\b(build|make|create|put|raise|place|construct|throw up|put up|give me|stack|run|set)\b/i.test(lowerMessage);
+    const hasBuildKeyword = /\b(tower|house|cabin|castle|fortress|bridge|dock|pier|windmill|mill|garden|wall|fence|gate|roof|tower|spire|cottage|well|lighthouse|beacon|road|path|tunnel|arch|column|pillar|fountain|stable|barn|forge|shop|market|temple|shrine|obelisk|statue|platform|deck|ramp|staircase|ladder|tower|platform|room|chamber|hall|corridor|tunnel|cave|mine|pit|trench|mound|hill|pond|lake|river|waterfall|tree|forest|rock|boulder|cliff|mountain|valley|canyon|plateau|ridge|summit|peak|pass|gorge|ravine|gulch|hollow|flat|clearing|meadow|field|orchard|grove|copse|thicket|marsh|bog|fen|swamp|estuary|bay|cove|inlet|strait|channel|sound|passage|canal|aqueduct|viaduct|causeway|levee|dike|dam|weir|sluice|lock|pier|wharf|quay|bulkhead|seawall|breakwater|jetty|mole|spawn|mooring|anchor|chain|rope|cable|line|hawser|sheet|guy|brace|strut|beam|girder|joist|rafter|purlin|stud|post|column|pillar|pier|pile|stanchion|standard|brace|kn ee|gusset|plate|bracket|cleat|chock|wedge|key|cotter|bolt|rivet|screw|nail|spike|peg|pin|tack|clamp|vise|grip|catch|latch|lock|hinge|hasp|hook&loop|toggle|snap|buckle|button|zipper|Velcro)\b/i.test(lowerMessage);
+
+    let intent: ChatResponse["intent"] = "talk";
+    let buildType: string | null = null;
+
+    if (hasBuildVerb || hasBuildKeyword) {
+      intent = "build";
+      // Try to extract a build type
+      const buildMatch = lowerMessage.match(/\b(tower|house|cabin|castle|fortress|fort|bridge|dock|pier|windmill|mill|garden|wall|cottage|well|lighthouse|fountain|stable|barn|forge|arch|column|pillar|temple|gate|fence|road|path)\b/);
+      buildType = buildMatch ? buildMatch[1] : null;
+    } else if (/\b(look|explore|see|where|what|why|how|tell me about|what's|show me)\b/i.test(lowerMessage)) {
+      intent = "explore";
+    }
+
+    return { reply, intent, buildType };
+  } catch (e) {
+    // Fallback — don't break the game if AI fails
+    return {
+      reply: "Line's noisy. Tell me again what you need built.",
+      intent: "talk" as const,
+      buildType: null,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Workers AI — build command generation
+// ---------------------------------------------------------------------------
+
+const BUILD_GEN_SYSTEM_PROMPT = `You generate JSON build commands for a game. Output ONLY a JSON array. No markdown fences, no explanation.
+
+Each element creates a part:
+{"type":"createPart","params":{"name":"string","shape":"Block|Cylinder|Ball|Cone|Wedge","size":{"x":N,"y":N,"z":N},"position":{"x":N,"y":N,"z":N},"material":"Stone|Wood|WoodPlanks|Brick|Cobblestone|Concrete|Slate|Metal|Glass|Neon|Grass|Sand|Ice|Plastic","color":{"r":0to255,"g":0to255,"b":0to255},"anchored":true}}
+
+Or a light:
+{"type":"addLight","params":{"parent":"PartName","lightType":"PointLight","brightness":N,"range":N,"color":{"r":255,"g":220,"b":100}}}
+
+EXAMPLE - a simple sign post:
+[{"type":"createPart","params":{"name":"Post","shape":"Cylinder","size":{"x":0.5,"y":8,"z":0.5},"position":{"x":0,"y":4,"z":0},"material":"Wood","color":{"r":100,"g":70,"b":40},"anchored":true}},{"type":"createPart","params":{"name":"SignBoard","shape":"Block","size":{"x":4,"y":2,"z":0.3},"position":{"x":0,"y":7,"z":0},"material":"WoodPlanks","color":{"r":120,"g":85,"b":50},"anchored":true}}]
+
+Rules: Y=0 is ground level. Build from ground up. 3-8 parts. Muted weathered colors. Leave something unfinished.`;
+
+async function generateBuildCommands(
+  env: Env,
+  message: string,
+  chatReply: string,
+  buildType?: string | null,
+): Promise<GenerateBuildResponse> {
+  // Check templates first — instant
+  if (buildType && BUILD_TEMPLATES[buildType]) {
+    return {
+      commands: BUILD_TEMPLATES[buildType].commands as any[],
+      source: "template",
+      buildName: buildType,
+    };
+  }
+
+  // Also check fast keywords
+  const fastMatch = matchFastPath(message);
+  if (fastMatch) {
+    return {
+      commands: fastMatch.template.commands as any[],
+      source: "template",
+      buildName: fastMatch.buildName,
+    };
+  }
+
+  // Generate novel structure via Workers AI
+  try {
+    const userPrompt = `Player request: "${message}"
+Lucineier described: "${chatReply}"
+
+Generate build commands for this structure. Output only the JSON array.`;
+
+    const response = await env.AI.run(AI_MODEL, {
+      messages: [
+        { role: "system", content: BUILD_GEN_SYSTEM_PROMPT },
+        { role: "user", content: userPrompt },
+      ],
+      max_tokens: 1200,
+      temperature: 0.5,
+    });
+
+    // Workers AI chat completion returns choices[0].message.content as text
+    const resp = response as any;
+    const rawText: string =
+      resp.choices?.[0]?.message?.content ??
+      resp.response ??
+      (typeof response === "string" ? response : "");
+
+    // If response.response is already an array (Workers AI structured output), use directly
+    if (Array.isArray(resp.response)) {
+      return {
+        commands: resp.response,
+        source: "ai",
+        buildName: buildType || "custom",
+      };
+    }
+
+    // Parse the JSON array from the text response
+    const jsonMatch = rawText.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) {
+      throw new Error("No JSON array found. Raw: " + String(rawText).slice(0, 200));
+    }
+
+    const commands = JSON.parse(jsonMatch[0]);
+
+    if (!Array.isArray(commands) || commands.length === 0) {
+      throw new Error("Invalid commands array");
+    }
+
+    return {
+      commands,
+      source: "ai",
+      buildName: buildType || "custom",
+    };
+  } catch (e) {
+    // Fallback: return a simple platform so the player sees *something*
+    return {
+      commands: [
+        {
+          type: "createPart",
+          params: {
+            name: "Platform",
+            shape: "Block",
+            size: { x: 12, y: 1, z: 12 },
+            position: { x: 0, y: 0, z: 0 },
+            material: "Cobblestone",
+            color: { r: 130, g: 125, b: 120 },
+            anchored: true,
+          },
+        },
+        {
+          type: "createPart",
+          params: {
+            name: "Post",
+            shape: "Cylinder",
+            size: { x: 2, y: 8, z: 2 },
+            position: { x: 0, y: 4, z: 0 },
+            material: "Wood",
+            color: { r: 100, g: 70, b: 40 },
+            anchored: true,
+          },
+        },
+      ],
+      source: "ai",
+      buildName: buildType || "custom",
+    };
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Fast Path — keyword matching for instant template responses
@@ -196,6 +462,119 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   // --- Health check (no auth) ---
   if (path === "/api/health" && method === "GET") {
     return Response.json({ status: "ok", timestamp: Date.now() });
+  }
+
+  // =====================================================================
+  // WEB GAME API — LLM-powered endpoints for play-slackwater.pages.dev
+  // No auth required (public game API). Rate limiting via DO.
+  // =====================================================================
+
+  // --- POST /api/chat — Lucineier voice line via Workers AI ---
+  if (path === "/api/chat" && method === "POST") {
+    let body: ChatRequest;
+    try {
+      body = (await request.json()) as ChatRequest;
+    } catch {
+      return Response.json({ error: "Invalid JSON" }, { status: 400 });
+    }
+
+    if (!body.message || !body.playerName) {
+      return Response.json(
+        { error: "Missing required fields: message, playerName" },
+        { status: 400 },
+      );
+    }
+
+    const sessionId = body.playerName; // Use playerName as sessionId for web game
+    const bondLevel = body.bondLevel ?? 0;
+
+    const result = await generateChatResponse(
+      env,
+      body.message,
+      body.playerName,
+      bondLevel,
+      body.previousBuilds,
+    );
+
+    return Response.json(result);
+  }
+
+  // --- POST /api/generate-build — Build commands via template or Workers AI ---
+  if (path === "/api/generate-build" && method === "POST") {
+    let body: GenerateBuildRequest;
+    try {
+      body = (await request.json()) as GenerateBuildRequest;
+    } catch {
+      return Response.json({ error: "Invalid JSON" }, { status: 400 });
+    }
+
+    if (!body.message) {
+      return Response.json(
+        { error: "Missing required field: message" },
+        { status: 400 },
+      );
+    }
+
+    const result = await generateBuildCommands(
+      env,
+      body.message,
+      body.chatReply || "",
+      body.buildType,
+    );
+
+    return Response.json(result);
+  }
+
+  // --- GET /api/world/:sessionId — World state for a session ---
+  const worldMatch = path.match(/^\/api\/world\/([^/]+)$/);
+  if (worldMatch && method === "GET") {
+    const sessionId = decodeURIComponent(worldMatch[1]);
+    const stub = sessionStub(env, sessionId);
+    const [builds, worldState] = await Promise.all([
+      stub.getWorldBuilds(sessionId).catch(() => []),
+      stub.getWorldState(sessionId).catch(() => null),
+    ]);
+    return Response.json({
+      sessionId,
+      builds,
+      worldSnapshot: worldState,
+      timestamp: Date.now(),
+    });
+  }
+
+  // --- POST /api/world/:sessionId/build — Place a build in the world ---
+  const worldBuildMatch = path.match(/^\/api\/world\/([^/]+)\/build$/);
+  if (worldBuildMatch && method === "POST") {
+    const sessionId = decodeURIComponent(worldBuildMatch[1]);
+    let body: Omit<WorldBuild, "id" | "timestamp">;
+    try {
+      body = (await request.json()) as Omit<WorldBuild, "id" | "timestamp">;
+    } catch {
+      return Response.json({ error: "Invalid JSON" }, { status: 400 });
+    }
+
+    if (!body.type || !body.position || !body.playerName) {
+      return Response.json(
+        { error: "Missing required fields: type, position, playerName" },
+        { status: 400 },
+      );
+    }
+
+    const stub = sessionStub(env, sessionId);
+    const build = await stub.placeBuild(sessionId, body);
+    const newBond = await stub.getBondLevel(sessionId, body.playerName);
+
+    return Response.json({ ok: true, build, bondLevel: newBond });
+  }
+
+  // --- GET /api/world/:sessionId/bond — Get bond level ---
+  const bondMatch = path.match(/^\/api\/world\/([^/]+)\/bond$/);
+  if (bondMatch && method === "GET") {
+    const sessionId = decodeURIComponent(bondMatch[1]);
+    const playerName = url.searchParams.get("playerName") || sessionId;
+    const stub = sessionStub(env, sessionId);
+    const bondLevel = await stub.getBondLevel(sessionId, playerName);
+    return Response.json({ sessionId, playerName, bondLevel });
   }
 
   // =====================================================================

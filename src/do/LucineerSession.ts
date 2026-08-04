@@ -619,8 +619,101 @@ export class LucineerSession extends DurableObject<Env> {
   }
 
   // ---------------------------------------------------------------------------
-  // Helpers
+  // World builds — for the web game
   // ---------------------------------------------------------------------------
+
+  async placeBuild(
+    sessionId: string,
+    build: Omit<WorldBuild, "id" | "timestamp">,
+  ): Promise<WorldBuild> {
+    const id = `build-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const timestamp = Date.now();
+    const materials = JSON.stringify(build.materials);
+
+    this.ctx.storage.sql.exec(
+      `INSERT INTO world_builds
+        (id, session_id, type, position_x, position_y, position_z, materials, player_name, unfinished_hook, timestamp)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      id,
+      sessionId,
+      build.type,
+      build.position.x,
+      build.position.y,
+      build.position.z,
+      materials,
+      build.playerName,
+      build.unfinishedHook ?? null,
+      timestamp,
+    );
+
+    // Update bond state — first build of a session gets +1
+    await this.addBondPoints(sessionId, build.playerName, 1);
+
+    return { id, timestamp, ...build };
+  }
+
+  async getWorldBuilds(sessionId: string): Promise<WorldBuild[]> {
+    const cursor = this.ctx.storage.sql.exec(
+      `SELECT * FROM world_builds WHERE session_id = ? ORDER BY timestamp ASC`,
+      sessionId,
+    );
+    const rows = cursor.toArray() as SqlRow[];
+    return rows.map((row) => ({
+      id: row["id"] as string,
+      type: row["type"] as string,
+      position: {
+        x: row["position_x"] as number,
+        y: row["position_y"] as number,
+        z: row["position_z"] as number,
+      },
+      materials: JSON.parse(row["materials"] as string) as string[],
+      playerName: row["player_name"] as string,
+      unfinishedHook: (row["unfinished_hook"] as string) ?? undefined,
+      timestamp: row["timestamp"] as number,
+    }));
+  }
+
+  // ---------------------------------------------------------------------------
+  // Bond state — for the web game
+  // ---------------------------------------------------------------------------
+
+  async getBondLevel(sessionId: string, playerName: string): Promise<number> {
+    const cursor = this.ctx.storage.sql.exec(
+      `SELECT bond_level FROM bond_state WHERE session_id = ? AND player_name = ?`,
+      sessionId,
+      playerName,
+    );
+    const row = cursor.toArray()[0] as SqlRow | undefined;
+    return row ? Number(row["bond_level"]) : 0;
+  }
+
+  async addBondPoints(
+    sessionId: string,
+    playerName: string,
+    points: number,
+  ): Promise<number> {
+    const current = await this.getBondLevel(sessionId, playerName);
+    const newLevel = Math.max(0, current + points);
+    const now = Date.now();
+
+    this.ctx.storage.sql.exec(
+      `INSERT INTO bond_state (session_id, player_name, bond_level, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(session_id) DO UPDATE SET
+         bond_level = excluded.bond_level,
+         updated_at = excluded.updated_at`,
+      sessionId,
+      playerName,
+      newLevel,
+      now,
+    );
+
+    return newLevel;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Helpers
+  ---------------------------------------------------------------------------
 
   private rowToJob(row: SqlRow): Job {
     return {

@@ -206,4 +206,9 @@ export interface LucineerSessionRPC {
   getActiveSessions(): Promise<string[]>;
   /** Extend the lease on a claimed job. Returns the updated job or null. */
   renewLease(jobId: string, workerId?: string): Promise<Job | null>;
+  // Web game methods
+  placeBuild(sessionId: string, build: Omit<WorldBuild, "id" | "timestamp">): Promise<WorldBuild>;
+  getWorldBuilds(sessionId: string): Promise<WorldBuild[]>;
+  getBondLevel(sessionId: string, playerName: string): Promise<number>;
+  addBondPoints(sessionId: string, playerName: string, points: number): Promise<number>;
 }

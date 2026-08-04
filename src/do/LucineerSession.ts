@@ -6,7 +6,7 @@ import type {
   WorldSnapshot,
   MessageHistoryEntry,
   BuildCommand,
-  LucineerSessionRPC,
+  WorldBuild,
 } from "../types";
 
 /** Lease duration: a claimed job is considered stale after 3 minutes. */
@@ -75,6 +75,27 @@ export class LucineerSession extends DurableObject<Env> {
         last_seen INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_active_sessions_seen ON active_sessions(last_seen);
+
+      CREATE TABLE IF NOT EXISTS world_builds (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        position_x REAL NOT NULL,
+        position_y REAL NOT NULL,
+        position_z REAL NOT NULL,
+        materials TEXT NOT NULL,
+        player_name TEXT NOT NULL,
+        unfinished_hook TEXT,
+        timestamp INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_world_builds_session ON world_builds(session_id);
+
+      CREATE TABLE IF NOT EXISTS bond_state (
+        session_id TEXT PRIMARY KEY,
+        player_name TEXT NOT NULL,
+        bond_level INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
+      );
     `);
 
     // Migrate existing tables: add columns if missing

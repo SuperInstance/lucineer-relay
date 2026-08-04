@@ -14,7 +14,62 @@ export interface Env {
   LUCINEER_SHARED_SECRET?: string;
   /** R2 bucket for MOLT trajectory logs. */
   LUCINEER_TRAJECTORIES: R2Bucket;
+  /** Cloudflare Workers AI binding for LLM-powered responses. */
+  AI: Ai;
   OPENCLAW_CALLBACK_URL?: string;
+}
+
+// --- Workers AI types ---
+
+export interface AiTextGenerationOptions {
+  max_tokens?: number;
+  temperature?: number;
+  top_p?: number;
+  frequency_penalty?: number;
+  presence_penalty?: number;
+}
+
+export interface AiChatMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+// --- Web Game API types ---
+
+export interface ChatRequest {
+  message: string;
+  playerName: string;
+  bondLevel?: number;
+  previousBuilds?: string[];
+}
+
+export interface ChatResponse {
+  reply: string;
+  intent: "build" | "explore" | "talk";
+  buildType: string | null;
+}
+
+export interface GenerateBuildRequest {
+  message: string;
+  chatReply: string;
+  buildType?: string | null;
+  playerName?: string;
+}
+
+export interface GenerateBuildResponse {
+  commands: BuildCommand[];
+  source: "template" | "ai";
+  buildName: string;
+}
+
+export interface WorldBuild {
+  id: string;
+  type: string;
+  position: { x: number; y: number; z: number };
+  materials: string[];
+  timestamp: number;
+  playerName: string;
+  unfinishedHook?: string;
 }
 
 // --- Request payloads ---

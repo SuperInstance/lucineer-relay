@@ -21,6 +21,10 @@
     }
   ],
 
+  "ai": {
+    "binding": "AI"
+  },
+
   "r2_buckets": [
     {
       "binding": "LUCINEER_TRAJECTORIES",

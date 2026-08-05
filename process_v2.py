@@ -63,6 +63,60 @@ SCHEDULER_URL = os.environ.get("SCHEDULER_URL", "http://localhost:8771")
 # Fallback to direct brain.py if scheduler is unavailable
 SCHEDULER_FALLBACK = True  # if scheduler is down, fall back to brain.py
 
+# ─── Scheduler Circuit Breaker ──────────────────────────────────────────────
+# Tracks consecutive scheduler failures. After SCHEDULER_CB_THRESHOLD (3)
+# failures, the circuit opens and all scheduler calls are short-circuited
+# to the brain.py fallback — no more wasted curl/connect-timeout latency.
+# Every SCHEDULER_CB_RESET_INTERVAL seconds we try one probe (half-open).
+# If the probe succeeds, the circuit closes and the scheduler is used again.
+SCHEDULER_CB_THRESHOLD = 3
+SCHEDULER_CB_RESET_INTERVAL = 120  # seconds between half-open probes
+_scheduler_failures = 0
+_scheduler_circuit_open = False
+_scheduler_last_probe = 0.0
+
+def scheduler_circuit_state():
+    """Return (is_open, should_probe). If open but enough time has passed,
+    we allow a single probe attempt (half-open state)."""
+    global _scheduler_circuit_open, _scheduler_last_probe
+    if not _scheduler_circuit_open:
+        return False, False
+    now = time.time()
+    if now - _scheduler_last_probe >= SCHEDULER_CB_RESET_INTERVAL:
+        _scheduler_last_probe = now
+        return True, True  # open but probing
+    return True, False
+
+def record_scheduler_success():
+    """Reset the circuit breaker on a successful scheduler interaction."""
+    global _scheduler_failures, _scheduler_circuit_open
+    if _scheduler_circuit_open or _scheduler_failures > 0:
+        log("  Scheduler circuit: CLOSED (recovered)")
+    _scheduler_failures = 0
+    _scheduler_circuit_open = False
+
+def record_scheduler_failure():
+    """Increment failure counter; trip the circuit when threshold is reached."""
+    global _scheduler_failures, _scheduler_circuit_open
+    _scheduler_failures += 1
+    if _scheduler_failures >= SCHEDULER_CB_THRESHOLD and not _scheduler_circuit_open:
+        _scheduler_circuit_open = True
+        _scheduler_last_probe = time.time()
+        log(f"  Scheduler circuit: OPEN — {_scheduler_failures} consecutive failures, "
+            f"falling back to brain.py for {SCHEDULER_CB_RESET_INTERVAL}s", "WARN")
+
+def check_scheduler_health():
+    """Quick health-check the scheduler. Returns True if healthy."""
+    try:
+        result = subprocess.run(
+            ['curl', '-s', '--max-time', '3', f'{SCHEDULER_URL}/health'],
+            capture_output=True, text=True, timeout=5
+        )
+        data = json.loads(result.stdout)
+        return data.get("ok", False)
+    except Exception:
+        return False
+
 # ─── Daemon Resilience Config ────────────────────────────────────────────────
 CIRCUIT_BREAKER_THRESHOLD = 5  # consecutive failures before tripping
 HEARTBEAT_INTERVAL = 60        # seconds between idle heartbeats
@@ -1972,19 +2026,37 @@ def process_job(job, force_deep=False, worker_id=WORKER_ID):
 
     # ─── 6. Deep path: scheduler → brain.py fallback ───
     if not reply:
-        log(f"  → Inference scheduler pipeline...")
         renewal = LeaseRenewal(job_id, worker_id)
         renewal.start()
         try:
-            # Primary path: route through scheduler (reflex → local Ollama → cloud)
-            brain_result = call_scheduler_brain(
-                player_message=message,
-                world_context=world_ctx,
-                memory_context=memory_ctx,
-                skill_context=skill_ctx,
-            )
+            # Check circuit breaker before attempting scheduler
+            circuit_open, should_probe = scheduler_circuit_state()
+            brain_result = None
 
-            # Fallback: direct brain.py if scheduler failed
+            if not circuit_open or should_probe:
+                if should_probe:
+                    log(f"  → Scheduler circuit: half-open probe...")
+                log(f"  → Inference scheduler pipeline...")
+                # Primary path: route through scheduler (reflex → local Ollama → cloud)
+                brain_result = call_scheduler_brain(
+                    player_message=message,
+                    world_context=world_ctx,
+                    memory_context=memory_ctx,
+                    skill_context=skill_ctx,
+                )
+
+                if brain_result:
+                    record_scheduler_success()
+                    used_path = "scheduler"
+                else:
+                    record_scheduler_failure()
+                    if should_probe:
+                        log(f"  → Scheduler probe failed, circuit stays OPEN", "WARN")
+            else:
+                # Circuit is open — skip scheduler entirely
+                log(f"  → Scheduler circuit OPEN, skipping to brain.py")
+
+            # Fallback: direct brain.py if scheduler failed or was skipped
             if not brain_result and SCHEDULER_FALLBACK:
                 log(f"  → Falling back to brain.py...")
                 used_path = "deep-brain-fallback"
@@ -1994,8 +2066,6 @@ def process_job(job, force_deep=False, worker_id=WORKER_ID):
                     memory_context=memory_ctx,
                     skill_context=skill_ctx,
                 )
-            else:
-                used_path = "scheduler"
 
             if brain_result:
                 reply = brain_result.get("reply", "")
@@ -2104,6 +2174,16 @@ def run_loop(interval=2, force_deep=False):
     log(f"  Vector:  {VECTOR_URL}")
     log(f"  Brain:   {BRAIN_SCRIPT}")
     log(f"  Scheduler: {SCHEDULER_URL}")
+    # Startup health check for scheduler
+    global _scheduler_circuit_open, _scheduler_failures, _scheduler_last_probe
+    if check_scheduler_health():
+        log("  Scheduler: healthy ✓")
+        _scheduler_circuit_open = False
+        _scheduler_failures = 0
+    else:
+        log("  Scheduler: UNHEALTHY — starting with circuit OPEN", "WARN")
+        _scheduler_circuit_open = True
+        _scheduler_last_probe = time.time()
     log(f"  Mode:    {'DEEP-ONLY' if force_deep else 'HYBRID (template→scheduler→brain)'}")
     log(f"  Poll:    every {interval}s")
     log(f"  Circuit breaker: {CIRCUIT_BREAKER_THRESHOLD} consecutive failures")

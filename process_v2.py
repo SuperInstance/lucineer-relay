@@ -163,39 +163,55 @@ def _check_auth_failure(path, parsed):
     return False
 
 
-def api_get(path):
+def api_get(path, _retries=2):
     """GET from Worker using curl (Cloudflare blocks Python urllib)."""
-    try:
-        result = subprocess.run(
-            ['curl', '-s', '--max-time', '10',
-             '-H', f'X-Lucineer-Key: {AUTH_KEY}',
-             f'{WORKER_URL}{path}'],
-            capture_output=True, text=True, timeout=15
-        )
-        parsed = json.loads(result.stdout)
-        _check_auth_failure(path, parsed)
-        return parsed
-    except Exception as e:
-        log(f"API GET failed for {path}: {e}", "ERROR")
-        return {}
+    for attempt in range(_retries + 1):
+        try:
+            result = subprocess.run(
+                ['curl', '-s', '--max-time', '10',
+                 '-H', f'X-Lucineer-Key: {AUTH_KEY}',
+                 f'{WORKER_URL}{path}'],
+                capture_output=True, text=True, timeout=15
+            )
+            stdout = result.stdout.strip()
+            if not stdout:
+                raise ValueError("empty response body (Cloudflare edge issue)")
+            parsed = json.loads(stdout)
+            _check_auth_failure(path, parsed)
+            return parsed
+        except Exception as e:
+            if attempt < _retries:
+                log(f"API GET {path} attempt {attempt+1}/{_retries+1} failed: {e} — retrying in 1s", "WARN")
+                time.sleep(1)
+            else:
+                log(f"API GET failed for {path} after {_retries+1} attempts: {e}", "ERROR")
+                return {}
 
-def api_post(path, data):
+def api_post(path, data, _retries=2):
     """POST to Worker using curl."""
-    try:
-        body = json.dumps(data)
-        result = subprocess.run(
-            ['curl', '-s', '--max-time', '10',
-             '-X', 'POST',
-             '-H', f'X-Lucineer-Key: {AUTH_KEY}',
-             '-H', 'Content-Type: application/json',
-             '-d', body,
-             f'{WORKER_URL}{path}'],
-            capture_output=True, text=True, timeout=15
-        )
-        return json.loads(result.stdout)
-    except Exception as e:
-        log(f"API POST failed for {path}: {e}", "ERROR")
-        return {}
+    body = json.dumps(data)
+    for attempt in range(_retries + 1):
+        try:
+            result = subprocess.run(
+                ['curl', '-s', '--max-time', '10',
+                 '-X', 'POST',
+                 '-H', f'X-Lucineer-Key: {AUTH_KEY}',
+                 '-H', 'Content-Type: application/json',
+                 '-d', body,
+                 f'{WORKER_URL}{path}'],
+                capture_output=True, text=True, timeout=15
+            )
+            stdout = result.stdout.strip()
+            if not stdout:
+                raise ValueError("empty response body (Cloudflare edge issue)")
+            return json.loads(stdout)
+        except Exception as e:
+            if attempt < _retries:
+                log(f"API POST {path} attempt {attempt+1}/{_retries+1} failed: {e} — retrying in 1s", "WARN")
+                time.sleep(1)
+            else:
+                log(f"API POST failed for {path} after {_retries+1} attempts: {e}", "ERROR")
+                return {}
 
 
 def renew_lease(job_id, worker_id):

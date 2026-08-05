@@ -427,16 +427,80 @@ def _filter_valid_commands(commands):
     return valid
 
 
+
+def _try_extract_json_last(text: str):
+    """Like _try_extract_json but finds the LAST JSON object in the text.
+    Used as a fallback when the first JSON block is incomplete.
+    """
+    last_brace = text.rfind('}')
+    if last_brace == -1:
+        return None
+
+    # Walk backwards to find the matching opening brace
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(last_brace, -1, -1):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        # Check for escape by looking at preceding char
+        if ch == '\\' and in_string:
+            escape = True
+            continue
+        if ch == '"' and not escape:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '}':
+            depth += 1
+        elif ch == '{':
+            depth -= 1
+            if depth == 0:
+                candidate = text[i:last_brace + 1]
+                try:
+                    obj = json.loads(candidate)
+                    if isinstance(obj, dict):
+                        return obj
+                except json.JSONDecodeError:
+                    pass
+                break
+    return None
+
+def _strip_build_json_from_text(text: str) -> str:
+    """Remove JSON build-command fragments from conversational text.
+
+    Models sometimes embed raw JSON like {"type": "createPart", ...} inside
+    a prose reply. This strips those fragments while preserving the text.
+    """
+    # Remove JSON objects that look like build commands
+    cleaned = _re.sub(
+        r'\{"type"\s*:\s*"(?:createPart|addLight|addParticle)"[^}]*\}',
+        '', text, flags=_re.DOTALL
+    )
+    # Clean up orphaned braces left behind after JSON removal
+    # Match braces surrounded by whitespace or at string boundaries
+    cleaned = _re.sub(r'(\s)\}(\s)', r'\1\2', cleaned)  # orphaned closing brace
+    cleaned = _re.sub(r'(\s)\{(\s)', r'\1\2', cleaned)  # orphaned opening brace
+    # Collapse multiple spaces
+    cleaned = _re.sub(r'\s{2,}', ' ', cleaned).strip()
+    return cleaned if cleaned else text
+
+
 def unwrap_model_response(raw_text: str) -> dict:
     """Robustly extract {reply, commands} from a model response.
 
     Handles:
-      • Clean JSON: {"reply": "...", "commands": [...]}
-      • Markdown-fenced JSON: ```json\n{...}\n```
-      • Prose + JSON: "Here you go!\n{...}"
-      • Double-encoded: "{\\"reply\\": ...}" (JSON string as reply)
-      • Unquoted keys: {x: 10, y: 5} (granite 2B)
-      • Raw text with no JSON at all (conversational)
+      \u2022 Clean JSON: {"reply": "...", "commands": [...]}
+      \u2022 Markdown-fenced JSON: ```json\n{...}\n```
+      \u2022 Prose + JSON: "Here you go!\n{...}"
+      \u2022 Double-encoded: "{\"reply\": ...}" (JSON string as reply)
+      \u2022 Triple-encoded: entire response wrapped as a quoted string
+      \u2022 Build commands embedded inside reply text
+      \u2022 Unquoted keys: {x: 10, y: 5} (granite 2B)
+      \u2022 Raw text with no JSON at all (conversational)
 
     Always returns a dict with 'reply' (str) and 'commands' (list).
     """
@@ -445,14 +509,50 @@ def unwrap_model_response(raw_text: str) -> dict:
 
     text = raw_text.strip()
 
+    # Step 0: handle double-stringified responses
+    # Model returns the entire JSON as a quoted string:
+    #   "{\"reply\": \"...\", \"commands\": [...]}"
+    # json.loads() gives us the inner string, which we parse again.
+    if text.startswith('"') and text.endswith('"'):
+        try:
+            unquoted = json.loads(text)
+            if isinstance(unquoted, str) and ('reply' in unquoted or '{' in unquoted):
+                text = unquoted.strip()
+        except json.JSONDecodeError:
+            pass  # Not a JSON string literal \u2014 proceed with original text
+
     # Step 1: try to extract a JSON object
     obj = _try_extract_json(text)
+
+    # If the first JSON block is incomplete (no reply, or reply but no commands
+    # when a later block has both), try the last JSON block.
+    # Models sometimes emit "thinking" JSON followed by the real result.
+    if obj:
+        has_reply = bool(obj.get("reply"))
+        has_commands = bool(obj.get("commands"))
+        if not has_reply or not has_commands:
+            last_obj = _try_extract_json_last(text)
+            if last_obj:
+                last_reply = bool(last_obj.get("reply"))
+                last_commands = bool(last_obj.get("commands"))
+                # Prefer the last block if it's more complete
+                if (last_reply and last_commands and not (has_reply and has_commands)):
+                    obj = last_obj
+                elif last_reply and not has_reply:
+                    obj = last_obj
+
+    if obj is not None:
+        # If the JSON object doesn't have "reply" or "commands" keys,
+        # it's not a model response — it's a stray JSON fragment in prose.
+        # Fall through to Step 2 (treat as conversational text).
+        if "reply" not in obj and "commands" not in obj:
+            obj = None
 
     if obj is not None:
         reply = obj.get("reply", "")
         commands = obj.get("commands", [])
 
-        # ── Inner unwrap: the reply field itself might contain JSON ──
+        # \u2500\u2500 Inner unwrap: the reply field itself might contain JSON \u2500\u2500
         # This happens when the model double-encodes: the outer JSON's reply
         # value is itself a JSON string like '{"reply": "...", "commands": [...]}'
         if reply and isinstance(reply, str):
@@ -463,7 +563,7 @@ def unwrap_model_response(raw_text: str) -> dict:
                 if not commands:
                     commands = inner.get("commands", [])
 
-        # ── Handle reply being a non-string (object/dict) ──
+        # \u2500\u2500 Handle reply being a non-string (object/dict) \u2500\u2500
         # Small models sometimes nest it: "reply": {"text": "..."}
         if isinstance(reply, dict):
             reply = reply.get("text", "") or reply.get("message", "") or json.dumps(reply)
@@ -474,16 +574,22 @@ def unwrap_model_response(raw_text: str) -> dict:
         if not isinstance(commands, list):
             commands = []
 
+        # \u2500\u2500 Strip any embedded build-command JSON from the reply text \u2500\u2500
+        # Models sometimes leave {"type": "createPart", ...} in the prose
+        reply = _strip_build_json_from_text(reply)
+
         # Filter to only valid build commands
         commands = _filter_valid_commands(commands)
 
         return {"reply": reply.strip(), "commands": commands}
 
-    # Step 2: no JSON found — treat the entire text as a conversational reply
+    # Step 2: no JSON found \u2014 treat the entire text as a conversational reply
     # But strip any obvious JSON-like fragments from the visible text
     cleaned = _re.sub(r'\{"reply"\s*:.*?\}', '', text, flags=_re.DOTALL).strip()
     if not cleaned:
         cleaned = text  # don't return empty if stripping ate everything
+    # Also strip build-command fragments from plain-text replies
+    cleaned = _strip_build_json_from_text(cleaned)
     return {"reply": cleaned[:500], "commands": []}
 
 
@@ -2360,14 +2466,28 @@ def process_job(job, force_deep=False, worker_id=WORKER_ID):
     # ─── 7. Sanitize reply + safety check + post result to Worker ───
     # Final defense against JSON leakage: if the reply still contains
     # raw JSON after all upstream unwrapping, strip it out.
-    if reply and reply.strip().startswith('{') and '"reply"' in reply[:50]:
-        # The reply is raw JSON — unwrap one more time
-        emergency = unwrap_model_response(reply)
-        if emergency.get("reply"):
-            reply = emergency["reply"]
-            if not commands:
-                commands = emergency.get("commands", [])
-            log(f"  Emergency unwrap caught JSON in reply field", "WARN")
+    # Broadened from narrow startswith({) check to catch more patterns.
+    if reply:
+        reply_stripped = reply.strip()
+        needs_unwrap = (
+            # Pattern 1: reply IS a JSON object (original check, broadened)
+            (reply_stripped.startswith('{') and '"reply"' in reply_stripped[:100])
+            # Pattern 2: reply is a double-quoted JSON string
+            or (reply_stripped.startswith('"') and '\\' in reply_stripped[:50])
+            # Pattern 3: reply contains "commands" key (JSON leaked into prose)
+            or ('"commands"' in reply_stripped[:200] and '"type"' in reply_stripped[:200])
+            # Pattern 4: reply starts with a markdown JSON fence
+            or reply_stripped.startswith('```json')
+            # Pattern 5: build command JSON embedded in reply
+            or ('"type": "createPart"' in reply_stripped or '"type":"createPart"' in reply_stripped)
+        )
+        if needs_unwrap:
+            emergency = unwrap_model_response(reply)
+            if emergency.get("reply"):
+                reply = emergency["reply"]
+                if not commands:
+                    commands = emergency.get("commands", [])
+                log(f"  Emergency unwrap caught JSON in reply field", "WARN")
 
     reply = apply_safety_check(reply)
     success = False

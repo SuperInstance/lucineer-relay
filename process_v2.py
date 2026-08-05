@@ -163,15 +163,19 @@ def _check_auth_failure(path, parsed):
     return False
 
 
-def api_get(path, _retries=2):
-    """GET from Worker using curl (Cloudflare blocks Python urllib)."""
+def api_get(path, _retries=3):
+    """GET from Worker using curl (Cloudflare blocks Python urllib).
+    Uses exponential backoff: 1s → 2s → 4s → 8s.
+    On total failure, returns {} so the poll loop continues gracefully,
+    rather than raising and skipping the heartbeat cycle."""
     for attempt in range(_retries + 1):
         try:
             result = subprocess.run(
-                ['curl', '-s', '--max-time', '10',
+                ['curl', '-s', '--max-time', '20',
+                 '--retry', '0',
                  '-H', f'X-Lucineer-Key: {AUTH_KEY}',
                  f'{WORKER_URL}{path}'],
-                capture_output=True, text=True, timeout=15
+                capture_output=True, text=True, timeout=25
             )
             stdout = result.stdout.strip()
             if not stdout:
@@ -180,26 +184,31 @@ def api_get(path, _retries=2):
             _check_auth_failure(path, parsed)
             return parsed
         except Exception as e:
+            delay = 1 * (2 ** attempt)  # 1, 2, 4, 8 seconds
             if attempt < _retries:
-                log(f"API GET {path} attempt {attempt+1}/{_retries+1} failed: {e} — retrying in 1s", "WARN")
-                time.sleep(1)
+                log(f"API GET {path} attempt {attempt+1}/{_retries+1} failed: {e} — retrying in {delay}s", "WARN")
+                time.sleep(delay)
             else:
-                log(f"API GET failed for {path} after {_retries+1} attempts: {e}", "ERROR")
+                log(f"API GET failed for {path} after {_retries+1} attempts: {e} — poll loop will retry next cycle", "WARN")
                 return {}
 
-def api_post(path, data, _retries=2):
-    """POST to Worker using curl."""
+def api_post(path, data, _retries=3):
+    """POST to Worker using curl.
+    Uses exponential backoff: 1s → 2s → 4s → 8s.
+    On total failure, returns {} so the poll loop continues gracefully,
+    rather than raising and skipping the heartbeat cycle."""
     body = json.dumps(data)
     for attempt in range(_retries + 1):
         try:
             result = subprocess.run(
-                ['curl', '-s', '--max-time', '10',
+                ['curl', '-s', '--max-time', '20',
+                 '--retry', '0',
                  '-X', 'POST',
                  '-H', f'X-Lucineer-Key: {AUTH_KEY}',
                  '-H', 'Content-Type: application/json',
                  '-d', body,
                  f'{WORKER_URL}{path}'],
-                capture_output=True, text=True, timeout=15
+                capture_output=True, text=True, timeout=25
             )
             stdout = result.stdout.strip()
             if not stdout:
@@ -208,11 +217,12 @@ def api_post(path, data, _retries=2):
             _check_auth_failure(path, parsed)
             return parsed
         except Exception as e:
+            delay = 1 * (2 ** attempt)  # 1, 2, 4, 8 seconds
             if attempt < _retries:
-                log(f"API POST {path} attempt {attempt+1}/{_retries+1} failed: {e} — retrying in 1s", "WARN")
-                time.sleep(1)
+                log(f"API POST {path} attempt {attempt+1}/{_retries+1} failed: {e} — retrying in {delay}s", "WARN")
+                time.sleep(delay)
             else:
-                log(f"API POST failed for {path} after {_retries+1} attempts: {e}", "ERROR")
+                log(f"API POST failed for {path} after {_retries+1} attempts: {e} — poll loop will retry next cycle", "WARN")
                 return {}
 
 

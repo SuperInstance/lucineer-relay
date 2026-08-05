@@ -281,6 +281,200 @@ def memory_post(path, data):
         log(f"Memory POST failed for {path}: {e}", "WARN")
         return {}
 
+# ─── Response Unwrapping ─────────────────────────────────────────────────────
+# The model (scheduler local model, brain.py, or DeepInfra) is asked to return
+# JSON like {"reply": "...", "commands": [...]}.  But small local models
+# frequently:
+#   • wrap output in markdown fences (```json ... ```)
+#   • prepend prose ("Here is your build:")
+#   • double-encode the JSON as a string inside the reply field
+#   • return the raw JSON as the reply text itself
+# unwrap_model_response() handles all these cases and returns a clean
+# {reply, commands} dict.  This is the output-side counterpart of the
+# input-side message-unwrap fix.
+
+def _strip_markdown_fences(text: str) -> str:
+    """Remove ```json ... ``` or ``` ... ``` wrappers."""
+    m = _re.search(r'```(?:json)?\s*\n?(.*?)```', text, _re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    return text.strip()
+
+
+def _repair_json_keys(text: str) -> str:
+    """Fix unquoted object keys like {x: 10} → {"x": 10}.
+    Small models (granite 2B) frequently produce JS-style object literals
+    instead of strict JSON.  This regex adds quotes around bare keys.
+    """
+    # Match word-character sequences followed by a colon, inside braces
+    # Pattern: { wordchars :  →  { "wordchars":
+    return _re.sub(
+        r'(?<=[{,\s])([A-Za-z_]\w*)\s*:',
+        r'"\1":',
+        text,
+    )
+
+
+def _try_extract_json(text: str):
+    """Try to find and parse a JSON object in *text*.
+    Returns the parsed dict or None.
+    """
+    # Direct parse
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict):
+            return obj
+    except json.JSONDecodeError:
+        pass
+
+    # Strip markdown fences and retry
+    stripped = _strip_markdown_fences(text)
+    if stripped != text:
+        try:
+            obj = json.loads(stripped)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+
+    # Search for the first {...} block in the text
+    # (handles prose-prefixed JSON like "Sure! Here you go:\n{...}")
+    brace_start = stripped.find('{')
+    if brace_start == -1:
+        return None
+
+    # Find the matching closing brace
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(brace_start, len(stripped)):
+        ch = stripped[i]
+        if escape:
+            escape = False
+            continue
+        if ch == '\\' and in_string:
+            escape = True
+            continue
+        if ch == '"' and not escape:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                candidate = stripped[brace_start:i + 1]
+                # Try strict parse first
+                try:
+                    obj = json.loads(candidate)
+                    if isinstance(obj, dict):
+                        return obj
+                except json.JSONDecodeError:
+                    pass
+                # Try repairing unquoted keys (granite 2B produces {x: 10})
+                repaired = _repair_json_keys(candidate)
+                if repaired != candidate:
+                    try:
+                        obj = json.loads(repaired)
+                        if isinstance(obj, dict):
+                            return obj
+                    except json.JSONDecodeError:
+                        pass
+                break  # only try the first complete brace block
+
+    # Last resort: try repairing the entire stripped text
+    repaired_full = _repair_json_keys(stripped)
+    if repaired_full != stripped:
+        try:
+            obj = json.loads(repaired_full)
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
+def _is_valid_build_command(cmd):
+    """Check if a command dict has a valid structure for the Roblox builder."""
+    if not isinstance(cmd, dict):
+        return False
+    cmd_type = cmd.get("type", "")
+    if cmd_type in ("createPart", "addLight", "addParticle"):
+        return True
+    return False
+
+
+def _filter_valid_commands(commands):
+    """Filter to only valid build commands. If none survive, return []."""
+    if not isinstance(commands, list):
+        return []
+    valid = [c for c in commands if _is_valid_build_command(c)]
+    return valid
+
+
+def unwrap_model_response(raw_text: str) -> dict:
+    """Robustly extract {reply, commands} from a model response.
+
+    Handles:
+      • Clean JSON: {"reply": "...", "commands": [...]}
+      • Markdown-fenced JSON: ```json\n{...}\n```
+      • Prose + JSON: "Here you go!\n{...}"
+      • Double-encoded: "{\\"reply\\": ...}" (JSON string as reply)
+      • Unquoted keys: {x: 10, y: 5} (granite 2B)
+      • Raw text with no JSON at all (conversational)
+
+    Always returns a dict with 'reply' (str) and 'commands' (list).
+    """
+    if not raw_text or not raw_text.strip():
+        return {"reply": "", "commands": []}
+
+    text = raw_text.strip()
+
+    # Step 1: try to extract a JSON object
+    obj = _try_extract_json(text)
+
+    if obj is not None:
+        reply = obj.get("reply", "")
+        commands = obj.get("commands", [])
+
+        # ── Inner unwrap: the reply field itself might contain JSON ──
+        # This happens when the model double-encodes: the outer JSON's reply
+        # value is itself a JSON string like '{"reply": "...", "commands": [...]}'
+        if reply and isinstance(reply, str):
+            inner = _try_extract_json(reply)
+            if inner and ("reply" in inner or "commands" in inner):
+                # The inner JSON is the real payload
+                reply = inner.get("reply", reply)
+                if not commands:
+                    commands = inner.get("commands", [])
+
+        # ── Handle reply being a non-string (object/dict) ──
+        # Small models sometimes nest it: "reply": {"text": "..."}
+        if isinstance(reply, dict):
+            reply = reply.get("text", "") or reply.get("message", "") or json.dumps(reply)
+
+        # Ensure types are correct
+        if not isinstance(reply, str):
+            reply = str(reply)
+        if not isinstance(commands, list):
+            commands = []
+
+        # Filter to only valid build commands
+        commands = _filter_valid_commands(commands)
+
+        return {"reply": reply.strip(), "commands": commands}
+
+    # Step 2: no JSON found — treat the entire text as a conversational reply
+    # But strip any obvious JSON-like fragments from the visible text
+    cleaned = _re.sub(r'\{"reply"\s*:.*?\}', '', text, flags=_re.DOTALL).strip()
+    if not cleaned:
+        cleaned = text  # don't return empty if stripping ate everything
+    return {"reply": cleaned[:500], "commands": []}
+
+
 # ─── Vectorize API ────────────────────────────────────────────────────────────
 
 def vector_post(path, data):
@@ -346,7 +540,17 @@ def log_build(session_id, player_name, description, command_count, position):
 def get_recent_builds(player_name, limit=5):
     """Fetch player's recent builds."""
     result = memory_get(f"/api/memory/builds/{player_name}?limit={limit}")
-    return result.get("builds", [])
+    if not result:
+        log(f"  Memory: builds GET returned empty for {player_name}", "DEBUG")
+        return []
+    if isinstance(result, dict) and "error" in result:
+        log(f"  Memory: builds GET error for {player_name}: {result.get('error')}", "WARN")
+        return []
+    builds = result.get("builds", [])
+    if not isinstance(builds, list):
+        log(f"  Memory: builds response was {type(builds).__name__}, not list", "WARN")
+        return []
+    return builds
 
 # ─── Memory: Conversations ────────────────────────────────────────────────────
 
@@ -367,7 +571,17 @@ def log_conversation(session_id, player_name, role, content):
 def get_recent_conversations(session_id, limit=CONVERSATION_RECALL_LIMIT):
     """Fetch recent conversation turns for context recall."""
     result = memory_get(f"/api/memory/conversations/{session_id}?limit={limit}")
-    return result.get("conversations", [])
+    if not result:
+        log(f"  Memory: conversations GET returned empty for {session_id}", "DEBUG")
+        return []
+    if isinstance(result, dict) and "error" in result:
+        log(f"  Memory: conversations GET error for {session_id}: {result.get('error')}", "WARN")
+        return []
+    conversations = result.get("conversations", [])
+    if not isinstance(conversations, list):
+        log(f"  Memory: conversations response was {type(conversations).__name__}, not list", "WARN")
+        return []
+    return conversations
 
 def summarize_conversations(conversations):
     """Build a compact summary of recent conversation for brain context."""
@@ -1405,49 +1619,31 @@ def call_scheduler_brain(player_message, world_context="", memory_context="", sk
             log("  Scheduler returned empty response", "WARN")
             return None
 
-        # Parse the response — try JSON first (model was asked for JSON)
-        try:
-            parsed = json.loads(response_text)
-            reply = parsed.get("reply", "")
-            commands = parsed.get("commands", [])
-            if reply and commands:
-                log(f"  Scheduler parsed: {len(commands)} commands")
-                return {
-                    "reply": reply,
-                    "commands": commands,
-                    "_pipeline": {
-                        "served_by": served_by,
-                        "gpu_ms": gpu_ms,
-                        "model": final_status.get("model", "?"),
-                    }
-                }
-            elif reply:
-                # Got a reply but no commands — might be conversational
-                log(f"  Scheduler: reply only, no commands")
-                return {
-                    "reply": reply,
-                    "commands": [],
-                    "_pipeline": {
-                        "served_by": served_by,
-                        "gpu_ms": gpu_ms,
-                        "model": final_status.get("model", "?"),
-                    }
-                }
-        except json.JSONDecodeError:
-            # Model didn't return valid JSON — treat as plain text reply
-            log(f"  Scheduler response not JSON, using as plain text", "DEBUG")
-            # Try to extract something useful
+        # Parse the response with the robust unwrapper
+        unwrapped = unwrap_model_response(response_text)
+        reply = unwrapped.get("reply", "")
+        commands = unwrapped.get("commands", [])
+
+        if reply and commands:
+            log(f"  Scheduler parsed: {len(commands)} commands, reply={len(reply)} chars")
             return {
-                "reply": response_text[:500],  # truncate for safety
-                "commands": [],
+                "reply": reply,
+                "commands": commands,
                 "_pipeline": {
                     "served_by": served_by,
                     "gpu_ms": gpu_ms,
                     "model": final_status.get("model", "?"),
                 }
             }
-
-        return None
+        elif reply:
+            # Got a reply but no valid build commands.
+            # Return None so the caller falls through to brain.py which uses
+            # larger models that can actually generate build commands.
+            log(f"  Scheduler: reply only ({len(reply)} chars), 0 valid commands — deferring to brain.py for build generation")
+            return None
+        else:
+            log(f"  Scheduler: unwrapper returned empty reply", "WARN")
+            return None
 
     except subprocess.TimeoutExpired:
         log(f"  Scheduler timed out after {DEEP_TIMEOUT}s", "ERROR")
@@ -1501,11 +1697,15 @@ def call_brain(player_message, world_context="", memory_context="", skill_contex
             )
 
         if result.returncode == 0 and result.stdout.strip():
-            parsed = json.loads(result.stdout)
-            if parsed.get("reply") and parsed.get("commands"):
-                return parsed
+            # Use robust unwrapper instead of bare json.loads
+            unwrapped = unwrap_model_response(result.stdout)
+            if unwrapped.get("reply") and unwrapped.get("commands"):
+                return unwrapped
+            elif unwrapped.get("reply"):
+                # Reply but no commands — acceptable for conversational
+                return unwrapped
             else:
-                log(f"Brain returned incomplete: {str(parsed)[:200]}", "WARN")
+                log(f"Brain returned incomplete: {str(result.stdout)[:200]}", "WARN")
                 return None
         else:
             log(f"Brain failed: rc={result.returncode}, stderr={result.stderr[-300:]}", "ERROR")
@@ -1973,7 +2173,56 @@ def _process_vibe_code_job(job, job_id, player_name, message, session_id):
         return False
 
 
+def validate_job(job):
+    """Validate that a job dict has the required fields for processing.
+
+    This guard catches the class of bug where data passes between layers
+    (relay → processor) and arrives malformed — e.g. the relay's {jobId, job}
+    wrapper being passed directly to process_job(). Every field that defaults
+    silently in process_job() is checked here so we LOG LOUD instead of
+    processing empty messages for 48 hours.
+
+    Returns (ok, error_message).
+    """
+    if not isinstance(job, dict):
+        return False, f"job is {type(job).__name__}, not dict"
+
+    # Check for the relay wrapper shape: { jobId: ..., job: {...} }
+    # If 'jobId' is present but 'message' is not, we're looking at a wrapper.
+    if 'jobId' in job and 'message' not in job:
+        return False, (f"received relay wrapper {{jobId, job}} instead of inner job — "
+                       f"unwrap with entry.get('job', entry) before calling process_job")
+
+    message = job.get('message', '')
+    if not message or not message.strip():
+        return False, f"job {job.get('id', '?')[:8]} has empty/missing 'message' field"
+
+    if not job.get('playerName'):
+        return False, f"job {job.get('id', '?')[:8]} has missing 'playerName' field"
+
+    if not job.get('sessionId'):
+        return False, f"job {job.get('id', '?')[:8]} has missing 'sessionId' field"
+
+    return True, None
+
+
 def process_job(job, force_deep=False, worker_id=WORKER_ID):
+    # ─── Validate job structure BEFORE any defaults mask problems ───
+    # The one-line bug (7e0de39) was exactly this: the relay wrapper had no
+    # 'message' key, job.get('message', '') silently returned '', and every
+    # deep-path reply was empty for 48 hours. This guard fails loud instead.
+    ok, err = validate_job(job)
+    if not ok:
+        log(f"REJECTING malformed job: {err}", "ERROR")
+        # Try to mark it as errored on the relay side if we have an ID
+        bad_id = job.get('id') or job.get('jobId', '') if isinstance(job, dict) else ''
+        if bad_id:
+            api_post(f"/api/job/{bad_id}/result", {
+                "reply": "Internal error — job was malformed. Try sending your message again.",
+                "commands": []
+            })
+        return False
+
     job_id = job.get('id', '')
     player_name = job.get('playerName', 'friend')
     message = job.get('message', '')
@@ -2096,7 +2345,18 @@ def process_job(job, force_deep=False, worker_id=WORKER_ID):
         finally:
             renewal.stop()
 
-    # ─── 7. Safety check + post result to Worker ───
+    # ─── 7. Sanitize reply + safety check + post result to Worker ───
+    # Final defense against JSON leakage: if the reply still contains
+    # raw JSON after all upstream unwrapping, strip it out.
+    if reply and reply.strip().startswith('{') and '"reply"' in reply[:50]:
+        # The reply is raw JSON — unwrap one more time
+        emergency = unwrap_model_response(reply)
+        if emergency.get("reply"):
+            reply = emergency["reply"]
+            if not commands:
+                commands = emergency.get("commands", [])
+            log(f"  Emergency unwrap caught JSON in reply field", "WARN")
+
     reply = apply_safety_check(reply)
     success = False
     try:

@@ -204,7 +204,9 @@ def api_post(path, data, _retries=2):
             stdout = result.stdout.strip()
             if not stdout:
                 raise ValueError("empty response body (Cloudflare edge issue)")
-            return json.loads(stdout)
+            parsed = json.loads(stdout)
+            _check_auth_failure(path, parsed)
+            return parsed
         except Exception as e:
             if attempt < _retries:
                 log(f"API POST {path} attempt {attempt+1}/{_retries+1} failed: {e} — retrying in 1s", "WARN")

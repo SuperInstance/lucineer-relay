@@ -2076,7 +2076,9 @@ def run_once(force_deep=False):
 
     log(f"Found {len(jobs)} pending job(s)")
     count = 0
-    for job in jobs:
+    for entry in jobs:
+        # Relay returns { jobId, job } wrappers — unwrap to the inner job dict
+        job = entry.get("job", entry) if isinstance(entry, dict) else entry
         try:
             if process_job(job, force_deep=force_deep, worker_id=WORKER_ID):
                 count += 1

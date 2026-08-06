@@ -631,9 +631,14 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     // ────────────────────────────────────────────────────────────────────
     const fastMatch = matchFastPath(body.message);
     if (fastMatch) {
+      // If the player is expressing an emotion, prepend Lucineer's empathic
+      // pre-response so the player feels heard even on a fast-path template.
+      const emotionPrefix = body.emotionalContext?.preResponse
+        ? body.emotionalContext.preResponse + " "
+        : "";
       return Response.json({
         status: "complete",
-        reply: fastMatch.template.reply,
+        reply: emotionPrefix + fastMatch.template.reply,
         commands: fastMatch.template.commands,
         source: "template",
         buildName: fastMatch.buildName,
@@ -653,7 +658,14 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 
     // ── DEEP PATH ────────────────────────────────────────────────────────
     // No template match — create a job for the brain pipeline.
+    // If the Roblox client sent emotionalContext (from EmotionalHandler.lua),
+    // append the modifier to the message so brain.py's detect_emotion and
+    // stage_intent pick up the emotional framing naturally.
     // ────────────────────────────────────────────────────────────────────
+    if (body.emotionalContext?.modifier) {
+      body.message = body.message + " [Emotional context: " + body.emotionalContext.modifier + "]";
+    }
+
     const { jobId } = await stub.createJob(body);
 
     // Register this session in the default DO's session registry so that

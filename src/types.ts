@@ -80,6 +80,18 @@ export interface IncomingMessage {
   message: string;
   playerState?: PlayerState;
   worldSnapshot?: WorldSnapshot;
+  /** Emotional context from Roblox EmotionalHandler.analyze().
+   *  Present when the player's message contains emotional keywords.
+   *  Passed through to brain.py so the pipeline can adjust build tone. */
+  emotionalContext?: {
+    emotion: string;
+    confidence: number;
+    keywordHits: number;
+    buildHints: string[];
+    modifier: string;
+    preResponse: string;
+    postResponse: string;
+  };
 }
 
 export interface PlayerState {

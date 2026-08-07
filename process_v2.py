@@ -75,7 +75,7 @@ _scheduler_failures = 0
 _scheduler_circuit_open = False
 _scheduler_last_probe = 0.0
 
-def scheduler_circuit_state():
+def scheduler_circuit_state() -> tuple[bool, bool]:
     """Return (is_open, should_probe). If open but enough time has passed,
     we allow a single probe attempt (half-open state)."""
     global _scheduler_circuit_open, _scheduler_last_probe
@@ -87,7 +87,7 @@ def scheduler_circuit_state():
         return True, True  # open but probing
     return True, False
 
-def record_scheduler_success():
+def record_scheduler_success() -> None:
     """Reset the circuit breaker on a successful scheduler interaction."""
     global _scheduler_failures, _scheduler_circuit_open
     if _scheduler_circuit_open or _scheduler_failures > 0:
@@ -95,7 +95,7 @@ def record_scheduler_success():
     _scheduler_failures = 0
     _scheduler_circuit_open = False
 
-def record_scheduler_failure():
+def record_scheduler_failure() -> None:
     """Increment failure counter; trip the circuit when threshold is reached."""
     global _scheduler_failures, _scheduler_circuit_open
     _scheduler_failures += 1
@@ -105,7 +105,7 @@ def record_scheduler_failure():
         log(f"  Scheduler circuit: OPEN — {_scheduler_failures} consecutive failures, "
             f"falling back to brain.py for {SCHEDULER_CB_RESET_INTERVAL}s", "WARN")
 
-def check_scheduler_health():
+def check_scheduler_health() -> bool:
     """Quick health-check the scheduler. Returns True if healthy."""
     try:
         result = subprocess.run(
@@ -130,7 +130,7 @@ CONVERSATION_RECALL_LIMIT = 5
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 
-def log(msg, level="INFO"):
+def log(msg: str, level: str = "INFO") -> None:
     ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     line = f"[{ts}] [{level}] {msg}"
     print(line, flush=True)
@@ -142,7 +142,7 @@ def log(msg, level="INFO"):
 
 # ─── Worker API ───────────────────────────────────────────────────────────────
 
-def _check_auth_failure(path, parsed):
+def _check_auth_failure(path: str, parsed: object) -> bool:
     """
     Surface auth rejections instead of letting them look like empty results.
 
@@ -327,7 +327,7 @@ def _repair_json_keys(text: str) -> str:
     )
 
 
-def _try_extract_json(text: str):
+def _try_extract_json(text: str) -> dict | None:
     """Try to find and parse a JSON object in *text*.
     Returns the parsed dict or None.
     """
@@ -409,7 +409,7 @@ def _try_extract_json(text: str):
     return None
 
 
-def _is_valid_build_command(cmd):
+def _is_valid_build_command(cmd: object) -> bool:
     """Check if a command dict has a valid structure for the Roblox builder."""
     if not isinstance(cmd, dict):
         return False
@@ -419,7 +419,7 @@ def _is_valid_build_command(cmd):
     return False
 
 
-def _filter_valid_commands(commands):
+def _filter_valid_commands(commands: object) -> list[dict]:
     """Filter to only valid build commands. If none survive, return []."""
     if not isinstance(commands, list):
         return []
@@ -428,7 +428,7 @@ def _filter_valid_commands(commands):
 
 
 
-def _try_extract_json_last(text: str):
+def _try_extract_json_last(text: str) -> dict | None:
     """Like _try_extract_json but finds the LAST JSON object in the text.
     Used as a fallback when the first JSON block is incomplete.
     """
@@ -1576,7 +1576,7 @@ _BUILD_VERBS = _re.compile(r'\b(build|make|create|put|raise|place|add|give me|co
 # Negation — if present, don't match
 _NEGATIONS = _re.compile(r"\b(don'?t|do not|never|stop|no|not)\b", _re.IGNORECASE)
 
-def match_keyword(message):
+def match_keyword(message: str) -> list[dict] | None:
     """
     Word-boundary keyword matching with scoring.
     - Requires a build verb (build, make, create, etc.)
@@ -2291,7 +2291,7 @@ def _process_vibe_code_job(job, job_id, player_name, message, session_id):
         return False
 
 
-def validate_job(job):
+def validate_job(job: object) -> tuple[bool, str | None]:
     """Validate that a job dict has the required fields for processing.
 
     This guard catches the class of bug where data passes between layers
@@ -2565,7 +2565,7 @@ def run_once(force_deep=False):
             traceback.print_exc()
     return count
 
-def get_rss_mb():
+def get_rss_mb() -> float:
     """Return current process RSS in megabytes."""
     try:
         # ru_maxrss is in KB on Linux, KB on macOS

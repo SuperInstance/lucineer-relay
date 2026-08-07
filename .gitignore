@@ -1,8 +1,7 @@
 node_modules/
 .wrangler/
-*.log
 .dev.vars
 __pycache__/
 *.pyc
 *.log
-*.log
+.pytest_cache/

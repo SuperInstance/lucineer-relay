@@ -28,6 +28,7 @@ Roblox Client ──POST /api/message──▶  Worker  ──▶  LucineerSessi
 | Binding | Type | Purpose |
 |---------|------|---------|
 | `LUCINEER_SESSION` | Durable Object | SQLite-backed job queue and world state |
+| `DB` | D1 Database | Emotional memory (The Listener's Ear) |
 | `LUCINEER_TRAJECTORIES` | R2 Bucket | Append-only MOLT trajectory logs |
 | `LUCINEER_INTERNAL_KEY` | Secret | Processor authentication |
 | `LUCINEER_KEY` | Secret (legacy) | Backward-compatible auth key |
@@ -229,6 +230,54 @@ Unauthenticated health check.
 
 ---
 
+### Emotional Memory API (The Listener's Ear)
+
+The emotional memory system stores player emotional states in D1 so Lucineer remembers between sessions. When a player says "I'm scared," the system records it. Next time they return, Lucineier greets them differently and adjusts build style.
+
+**D1 Table:** `emotional_events` in `lucineer-memory` database
+
+#### `POST /api/emotions`
+
+Record a new emotional event.
+
+**Request:**
+```json
+{
+  "playerId": "string",
+  "emotion": "scared|lonely|sad|happy|excited|angry|worried",
+  "context": "the player's message",
+  "intensity": 0.5,
+  "sessionId": "optional",
+  "buildTheme": "optional"
+}
+```
+
+#### `GET /api/emotions/:playerId`
+
+Get emotional history for a player.
+
+#### `GET /api/emotions/:playerId/current`
+
+Get the current (most recent) emotional state with derived metrics: dominant emotion, volatility, days since last event.
+
+#### `GET /api/emotions/:playerId/context`
+
+Get emotional context for a build response. Returns greeting suggestions and build modifiers that Lucineier should use when this player returns.
+
+**Response:**
+```json
+{
+  "playerId": "PlayerAlpha",
+  "hasHistory": true,
+  "returningEmotion": "scared",
+  "greetingSuggestion": "Knew you'd come back. Kept the light on.",
+  "buildModifier": "Player was scared last time. Build something sturdy...",
+  "intensity": 0.7
+}
+```
+
+---
+
 ### Internal Endpoints (require `X-Lucineer-Key`)
 
 #### `GET /api/jobs/pending`
@@ -366,9 +415,12 @@ python3 process_v2.py --loop
 ```
 src/
 ├── index.ts              # Worker entry point, router, auth middleware
+├── emotional-memory.ts   # The Listener's Ear — D1 emotional memory system
 ├── types.ts              # Shared TypeScript interfaces (Env, Job, TrajectoryEvent, ...)
 └── do/
     └── LucineerSession.ts  # Durable Object: SQLite schema, job lifecycle, rate limiting
+migrations/
+  └── 001_emotional_memory.sql  # D1 schema for emotional events
 process_v2.py             # Hybrid-intelligence processor daemon (memory + vector + brain)
 process.py                # Legacy processor (pre-memory, pre-vector)
 bond.py                   # Player bond level tracking

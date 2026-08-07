@@ -6,6 +6,14 @@
   "compatibility_flags": ["nodejs_compat"],
   "account_id": "049ff5e84ecf636b53b162cbb580aae6",
 
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "lucineer-memory",
+      "database_id": "9cf282f9-d171-43b6-9fa3-57c49122b0fe"
+    }
+  ],
+
   "durable_objects": {
     "bindings": [
       {
@@ -24,6 +32,8 @@
   "ai": {
     "binding": "AI"
   },
+
+  // Initialize D1 emotional memory schema on first deploy
 
   "r2_buckets": [
     {

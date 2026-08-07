@@ -6,6 +6,8 @@ export interface Env {
    *  Typed to LucineerSession so RPC calls are checked at compile time.
    */
   LUCINEER_SESSION: DurableObjectNamespace<import("./do/LucineerSession").LucineerSession>;
+  /** D1 database for emotional memory (The Listener's Ear). */
+  DB: D1Database;
   /** Processor-facing key for /api/jobs/pending, /api/job/:id/result, /api/state, etc. */
   LUCINEER_INTERNAL_KEY: string;
   /** Legacy key — still accepted on internal endpoints during transition. */

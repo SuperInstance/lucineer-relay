@@ -14,6 +14,7 @@ import type {
   WorldBuild,
 } from "./types";
 import { BUILD_TEMPLATES, type BuildTemplate } from "./templates";
+import { handleEmotionalRoutes, initSchema as initEmotionalSchema, detectEmotion, getEmotionalContextForBuild, recordEmotion } from "./emotional-memory";
 
 export { LucineerSession };
 
@@ -95,8 +96,21 @@ async function generateChatResponse(
   playerName: string,
   bondLevel: number,
   previousBuilds?: string[],
+  emotionalGreeting?: string | null,
+  emotionalBuildModifier?: string | null,
 ): Promise<ChatResponse> {
-  const systemPrompt = systemPromptFor(bondLevel, previousBuilds);
+  let systemPrompt = systemPromptFor(bondLevel, previousBuilds);
+
+  // If emotional memory provided a greeting for a returning player,
+  // inject it so Lucineer acknowledges their history naturally.
+  if (emotionalGreeting) {
+    systemPrompt += `\n\nEMOTIONAL MEMORY\nThis player has emotional history with you. Open with something like: "${emotionalGreeting}" Adapt it naturally — don't copy verbatim. Reference the weather, the yard, the work. One sentence of acknowledgment, then get to building.`;
+  }
+
+  // If there's a build modifier from emotional memory, add it to the prompt
+  if (emotionalBuildModifier) {
+    systemPrompt += `\n\nEMOTIONAL BUILD CONTEXT\n${emotionalBuildModifier}`;
+  }
 
   const messages: AiChatMessage[] = [
     { role: "system", content: systemPrompt },
@@ -465,6 +479,16 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
   }
 
   // =====================================================================
+  // EMOTIONAL MEMORY API — The Listener's Ear
+  // D1-backed emotional memory. Public endpoints (game client calls these).
+  // Routes: /api/emotions, /api/emotions/:playerId, /api/emotions/:playerId/current
+  // =====================================================================
+  const emotionalResponse = await handleEmotionalRoutes(request, env, path, method);
+  if (emotionalResponse) {
+    return emotionalResponse;
+  }
+
+  // =====================================================================
   // WEB GAME API — LLM-powered endpoints for play-slackwater.pages.dev
   // No auth required (public game API). Rate limiting via DO.
   // =====================================================================
@@ -488,12 +512,46 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     const sessionId = body.playerName; // Use playerName as sessionId for web game
     const bondLevel = body.bondLevel ?? 0;
 
+    // ── Emotional Memory Integration ──────────────────────────────
+    // Before generating a response, check for emotional context:
+    //   1. Detect emotion in the current message
+    //   2. Query D1 for the player's emotional history
+    //   3. If returning with known history, adjust the system prompt
+    const currentEmotion = detectEmotion(body.message);
+    let emotionalGreeting: string | null = null;
+    let emotionalBuildModifier: string | null = null;
+
+    if (currentEmotion) {
+      // Record this emotional event for future reference
+      try {
+        await recordEmotion(env.DB, body.playerName, currentEmotion, body.message, {
+          sessionId,
+          intensity: 0.7,
+        });
+      } catch {
+        // Non-fatal — don't break chat if D1 is unavailable
+      }
+    }
+
+    // Get emotional context (history + current emotion) for the build response
+    try {
+      const emoCtx = await getEmotionalContextForBuild(env.DB, body.playerName, currentEmotion);
+      if (emoCtx.hasHistory) {
+        emotionalGreeting = emoCtx.greetingSuggestion;
+        emotionalBuildModifier = emoCtx.buildModifier;
+      }
+    } catch {
+      // Non-fatal — emotional memory is a bonus, not a requirement
+    }
+
     const result = await generateChatResponse(
       env,
       body.message,
       body.playerName,
       bondLevel,
       body.previousBuilds,
+      emotionalGreeting,
+      emotionalBuildModifier,
     );
 
     return Response.json(result);

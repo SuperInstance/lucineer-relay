@@ -1576,7 +1576,7 @@ _BUILD_VERBS = _re.compile(r'\b(build|make|create|put|raise|place|add|give me|co
 # Negation — if present, don't match
 _NEGATIONS = _re.compile(r"\b(don'?t|do not|never|stop|no|not)\b", _re.IGNORECASE)
 
-def match_keyword(message: str) -> list[dict] | None:
+def match_keyword(message: str):
     """
     Word-boundary keyword matching with scoring.
     - Requires a build verb (build, make, create, etc.)

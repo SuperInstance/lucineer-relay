@@ -15,8 +15,13 @@ import type {
 } from "./types";
 import { BUILD_TEMPLATES, type BuildTemplate } from "./templates";
 import { handleEmotionalRoutes, initSchema as initEmotionalSchema, detectEmotion, getEmotionalContextForBuild, recordEmotion } from "./emotional-memory";
+import { RequestQueue, ResponseCache } from "./RequestQueue";
 
-export { LucineerSession };
+export { LucineerSession, RequestQueue, ResponseCache };
+
+// ─── Queue & Cache singletons (per-isolate) ──────────────────────────────
+const requestQueue = new RequestQueue();
+const responseCache = new ResponseCache();
 
 // ---------------------------------------------------------------------------
 // Lucineier System Prompt — embedded from CHARACTER_BIBLE.md §9
@@ -475,7 +480,12 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 
   // --- Health check (no auth) ---
   if (path === "/api/health" && method === "GET") {
-    return Response.json({ status: "ok", timestamp: Date.now() });
+    return Response.json({
+      status: "ok",
+      timestamp: Date.now(),
+      queue: requestQueue.stats(),
+      cache: responseCache.stats(),
+    });
   }
 
   // =====================================================================
@@ -682,6 +692,23 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
       );
     }
 
+    // ── RESPONSE CACHE CHECK ────────────────────────────────────────────
+    // Before anything else: if we've answered this exact message recently,
+    // return the cached response instantly. This handles the case where
+    // a player builds the same thing twice (or another player asks the
+    // same question). Cache hits skip the entire pipeline.
+    // ────────────────────────────────────────────────────────────────────
+    const cached = responseCache.get(body.message);
+    if (cached) {
+      return Response.json({
+        ...cached,
+        status: "complete",
+        source: "cache",
+        jobId: null,
+        timestamp: Date.now(),
+      });
+    }
+
     // ── FAST PATH ────────────────────────────────────────────────────────
     // Check for keyword-matched build templates BEFORE anything else —
     // before rate limiting, before DO calls. Templates are pure computation
@@ -694,12 +721,31 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
       const emotionPrefix = body.emotionalContext?.preResponse
         ? body.emotionalContext.preResponse + " "
         : "";
-      return Response.json({
+      const fastResponse = {
         status: "complete",
         reply: emotionPrefix + fastMatch.template.reply,
         commands: fastMatch.template.commands,
         source: "template",
         buildName: fastMatch.buildName,
+        jobId: null,
+        timestamp: Date.now(),
+      };
+
+      // Cache the template response for future identical requests
+      responseCache.set(body.message, fastResponse);
+      return Response.json(fastResponse);
+    }
+
+    // ── REQUEST QUEUE ─────────────────────────────────────────────────────
+    // If many players are building simultaneously, queue requests instead
+    // of dropping them. Position 0 means immediate processing.
+    // ────────────────────────────────────────────────────────────────────
+    const queuePosition = requestQueue.enqueue(body);
+    if (queuePosition > 0) {
+      return Response.json({
+        status: "queued",
+        position: queuePosition,
+        message: `Server's busy. You're #${queuePosition} in line. Hang tight.`,
         jobId: null,
         timestamp: Date.now(),
       });
@@ -708,6 +754,7 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     const stub = sessionStub(env, body.sessionId);
     const withinLimit = await stub.checkRateLimit(body.sessionId);
     if (!withinLimit) {
+      requestQueue.complete(body.sessionId); // free the slot
       return Response.json(
         { error: "Rate limit exceeded. Max 10 messages per minute per session." },
         { status: 429 },
@@ -770,11 +817,22 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
     // Diag runs on the "default" DO
     const stub = sessionStub(env, "default");
     try {
-      const result = await stub.diag();
-      return Response.json(result);
+      const result: Record<string, unknown> = await stub.diag();
+      // Include queue and cache stats in diagnostics
+      return Response.json({
+        ...result,
+        queue: requestQueue.stats(),
+        cache: responseCache.stats(),
+      });
     } catch (e) {
       return Response.json({ error: String(e) }, { status: 500 });
     }
+  }
+
+  // --- DELETE /api/cache — clear response cache (admin) ---
+  if (path === "/api/cache" && method === "DELETE") {
+    const cleared = responseCache.clear();
+    return Response.json({ ok: true, cleared });
   }
 
   // --- POST /api/job/:jobId/result — processor posts results ---
@@ -795,12 +853,28 @@ async function handleRequest(request: Request, env: Env): Promise<Response> {
 
     const sessionId = sessionIdFromJobId(jobId);
     const stub = sessionStub(env, sessionId);
-    const job = await stub.getJob(jobId);
+    const job = (await stub.getJob(jobId)) as Job | null;
     if (!job) {
+      requestQueue.complete(sessionId);
       return Response.json({ error: "Job not found" }, { status: 404 });
     }
 
     await stub.setJobResult(jobId, body);
+
+    // ── CACHE & QUEUE MAINTENANCE ────────────────────────────────────────
+    // Store the result in the response cache so identical future requests
+    // return instantly. Also free the queue slot for this session.
+    // ────────────────────────────────────────────────────────────────────
+    if (job.message) {
+      const cacheEntry: Record<string, unknown> = {
+        reply: body.reply,
+        commands: body.commands ?? [],
+        source: "deep_cache",
+        buildName: "custom",
+      };
+      responseCache.set(job.message, cacheEntry);
+    }
+    requestQueue.complete(sessionId);
 
     return Response.json({
       ok: true,

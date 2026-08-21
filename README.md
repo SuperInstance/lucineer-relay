@@ -435,7 +435,7 @@ wrangler.jsonc            # Cloudflare Workers configuration
 
 | Repository | Role |
 |-----------|------|
-| [lucineer-brain](../lucineer-brain) | 4-stage multi-model pipeline (Seed → Planner → Coder → Hermes) |
+| [lucineer-system](../lucineer-system) | 4-stage multi-model pipeline (Seed → Planner → Coder → Hermes) |
 | [lucineer-memory](../lucineer-memory) | D1-backed player profiles, build history, conversations |
 | [lucineer-vector](../lucineer-vector) | Vectorize semantic skill library (bge-small-en, 384-dim) |
 | [lucineer-roblox](../lucineer-roblox) | Roblox client: 16 Lua modules, CommandExecutor, BeatClock |

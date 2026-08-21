@@ -141,7 +141,7 @@ rm process.py process-jobs.sh
 2. **DeepInfra key.** Deep-brain inference, content safety, and vibe-code require `DEEPINFRA_API_KEY`. The service file only has a commented example.
 3. **Memory/Vector services.** The processor defaults to production URLs. Verify those Workers are deployed and reachable; otherwise memory writes will warn and fall back to stubs.
 4. **R2 bucket.** `lucineer-trajectories` must exist in Cloudflare and be bound as `LUCINEER_TRAJECTORIES`.
-5. **`lucineer-brain/brain.py`.** The deep path shells out to `../lucineer-brain/brain.py`. Ensure it exists and its Python dependencies are installed on the processor host.
+5. **`lucineer-system/brain.py`.** The deep path shells out to `../lucineer-system/brain.py`. Ensure it exists and its Python dependencies are installed on the processor host.
 6. **Unique worker IDs for scale.** If you run multiple processor hosts, set a unique `LUCINEER_WORKER_ID` per host so lease renewal and ownership are unambiguous.
 7. **Monitoring/alerting.** There is no pager/webhook on circuit-breaker trips or repeated Worker 5xx. Add an alert on `journalctl` errors or Worker exceptions.
 8. **Systemd hardening.** `ProtectSystem=strict` plus `ReadWritePaths` may need adjustment if the processor needs to write to additional directories (e.g., model caches, extra log paths).

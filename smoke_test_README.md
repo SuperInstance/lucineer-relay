@@ -236,7 +236,7 @@ SMOKE TEST SUMMARY
 This smoke test is **complementary** to, not a replacement for:
 
 - **Unit tests** in the Worker (TypeScript) — test individual endpoints
-- **Brain tests** in `lucineer-brain/` — test model routing and JSON parsing
+- **Brain tests** in `lucineer-system/` — test model routing and JSON parsing
 - **Studio playtests** — the only true end-to-end test that exercises the Roblox
   client's `CommandExecutor`, `Poller`, and `ChatHandler`
 

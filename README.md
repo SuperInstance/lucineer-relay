@@ -459,7 +459,8 @@ wrangler.jsonc            # Cloudflare Workers configuration
 | [lucineer-system](../lucineer-system) | 4-stage multi-model pipeline (Seed → Planner → Coder → Hermes); design docs, roundtable analyses, architecture specs |
 | [lucineer-memory](../lucineer-memory) | D1-backed player profiles, build history, conversations |
 | [lucineer-vector](../lucineer-vector) | Vectorize semantic skill library (bge-small-en, 384-dim) |
-| [lucineer-roblox](../lucineer-roblox) | Roblox client: 16 Lua modules, CommandExecutor, BeatClock |
+| [lucineer-roblox](../lucineer-roblox) | Roblox client: 86 Lua modules (~47.5k lines, per lucineer-system r12 re-count; fresh r20 blob count: 91 `.lua` files), CommandExecutor, BeatClock |
+<!-- 2026-09-04 audit (round 20): this row previously said "16 Lua modules".\n     Corrected to 86 modules / 47.5k lines (lucineer-system r12 re-count,\n     7f6bdc1); independent r20 count of .lua blobs via gh api returned 91\n     (includes test/spec files beyond the module count). -->
 | [casting-call](../casting-call) | Model routing atlas and CastingDirector (Layer 8) |
 
 <!-- 2026-09-03 audit: removed duplicate lucineer-system row (it appeared twice

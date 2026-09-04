@@ -72,8 +72,13 @@ CREATE TABLE jobs (
   created_at  INTEGER NOT NULL,       -- ms epoch
   completed_at INTEGER,
   claimed_at  INTEGER,                -- ms epoch when processor claimed
+  claimed_by  TEXT,                   -- workerId of the claiming processor
+  lease_expires_at INTEGER,           -- lease deadline; renewable via /api/job/:id/renew
   attempts    INTEGER NOT NULL DEFAULT 0
 );
+
+-- 2026-09-03 audit note: the schema above previously omitted `claimed_by` and
+-- `lease_expires_at`; it now mirrors src/do/LucineerSession.ts exactly.
 
 CREATE TABLE world_state (
   session_id  TEXT PRIMARY KEY,
@@ -149,7 +154,9 @@ Claiming is an atomic compare-and-set: the DO updates `status = 'processing'` an
 
 ### Stale Job Recovery
 
-A 5-minute lease (`CLAIM_LEASE_MS = 300000`) prevents indefinite locking. The `cleanupStaleJobs()` RPC scans for `processing` jobs whose `claimed_at` is older than the lease, resets them to `pending`, and increments `attempts`. Jobs exceeding `MAX_ATTEMPTS = 3` are permanently errored.
+A lease prevents indefinite locking. The `cleanupStaleJobs()` RPC scans for `processing` jobs whose lease has expired, resets them to `pending`, and increments `attempts`. Jobs exceeding `MAX_ATTEMPTS = 3` are permanently errored. Long-running processors can call `POST /api/job/:jobId/renew` to extend their lease.
+
+> **2026-09-03 correction:** this section previously stated a 5-minute lease via `CLAIM_LEASE_MS = 300000`. The actual code is `LEASE_MS = 3 * 60 * 1000` (**3 minutes**, src/do/LucineerSession.ts:13), with per-worker lease renewal — verified by re-reading source, not docs.
 
 ---
 
@@ -361,6 +368,20 @@ R2 write failure returns 500 so the processor can retry. Trajectories are the hi
 
 Diagnostic endpoint returning schema info and job counts.
 
+### Additional Endpoints (2026-09-03 audit note)
+
+The router (src/index.ts) also exposes endpoints not previously listed here — verified against source:
+
+- `POST /api/jobs/claim` — atomic **batch** claim of pending jobs (the processor's preferred path; takes `workerId`, `limit`, `sessionId` from query params or JSON body, fans out across active sessions)
+- `POST /api/job/:jobId/renew` — extend a claimed job's lease
+- `POST /api/chat` — Lucineer voice line via Workers AI (`AI` binding)
+- `POST /api/generate-build` — build commands via template or Workers AI
+- `GET /api/quick/:message` — public fast-path template lookup
+- `GET /api/world/:sessionId`, `POST /api/world/:sessionId/build`, `GET /api/world/:sessionId/bond` — world state and bond level
+- `DELETE /api/cache` — clear response cache (admin)
+
+Also: the wrangler config binds a D1 database (`DB` → `lucineer-memory`) and the Workers AI binding (`AI`) in addition to the excerpt above.
+
 ---
 
 ## Processor (`process_v2.py`)
@@ -435,12 +456,14 @@ wrangler.jsonc            # Cloudflare Workers configuration
 
 | Repository | Role |
 |-----------|------|
-| [lucineer-system](../lucineer-system) | 4-stage multi-model pipeline (Seed → Planner → Coder → Hermes) |
+| [lucineer-system](../lucineer-system) | 4-stage multi-model pipeline (Seed → Planner → Coder → Hermes); design docs, roundtable analyses, architecture specs |
 | [lucineer-memory](../lucineer-memory) | D1-backed player profiles, build history, conversations |
 | [lucineer-vector](../lucineer-vector) | Vectorize semantic skill library (bge-small-en, 384-dim) |
 | [lucineer-roblox](../lucineer-roblox) | Roblox client: 16 Lua modules, CommandExecutor, BeatClock |
-| [lucineer-system](../lucineer-system) | Design docs, roundtable analyses, architecture specs |
 | [casting-call](../casting-call) | Model routing atlas and CastingDirector (Layer 8) |
+
+<!-- 2026-09-03 audit: removed duplicate lucineer-system row (it appeared twice
+     with different role descriptions); roles merged into the single row above. -->
 
 ---
 
